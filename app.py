@@ -24,7 +24,7 @@ from database import (
     init_db, get_active_signals, get_signal_history,
     get_watching_items, get_optimization_logs,
     get_performance_summary, update_signal_status,
-    get_bot_param
+    get_bot_param, get_recently_expired
 )
 from data_fetcher import data_fetcher
 from ict_strategy import ict_strategy
@@ -293,8 +293,16 @@ def api_signal_history():
 
 @app.route("/api/watchlist")
 def api_watchlist():
-    """İzleme listesi"""
+    """İzleme listesi + son expired"""
     items = get_watching_items()
+    return jsonify(items)
+
+
+@app.route("/api/watchlist/expired")
+def api_watchlist_expired():
+    """Son 30 dakikada expire edilen öğeler (neden bilgisiyle)"""
+    minutes = request.args.get("minutes", 30, type=int)
+    items = get_recently_expired(minutes)
     return jsonify(items)
 
 

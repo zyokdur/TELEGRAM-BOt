@@ -140,6 +140,10 @@ class TradeManager:
             max_watch=watch_candles
         )
 
+        if watch_id is None:
+            logger.debug(f"⏳ {signal['symbol']} son 15 dk içinde expire edildi, cooldown bekleniyor")
+            return None
+
         logger.info(f"👁️ İZLEMEYE ALINDI: {signal['symbol']} {signal['direction']} | "
                     f"Score: {signal['confluence_score']}%")
 
@@ -402,14 +406,16 @@ class TradeManager:
                               f"Onay: {confirmation_count}/{candles_watched} | Score: {new_score}")
                     continue
 
-                expire_watchlist_item(item["id"])
+                expire_watchlist_item(item["id"],
+                    reason=f"3 mum onay yetersiz ({confirmation_count}/{candles_watched})")
                 logger.info(f"⏰ İZLEME BİTTİ (ONAY YOK): {symbol} | "
                            f"Onay: {confirmation_count}/{candles_watched} | Son Score: {new_score}")
                 continue
 
             # Score düştüyse expire et
             if new_score < item["initial_score"] * 0.5:
-                expire_watchlist_item(item["id"])
+                expire_watchlist_item(item["id"],
+                    reason=f"Skor düştü ({item['initial_score']:.0f} → {new_score:.0f})")
                 logger.info(f"📉 İZLEME SKOR DÜŞTÜ: {symbol} | {item['initial_score']} -> {new_score}")
                 continue
 

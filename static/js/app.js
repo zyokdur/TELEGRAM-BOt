@@ -400,6 +400,33 @@ async function loadWatchlist() {
             <td><span class="badge badge-watching"><i class="fas fa-eye"></i> İzleniyor</span></td>
         </tr>`;
     }).join("");
+
+    // Son expire edilenleri yükle
+    loadExpired();
+}
+
+async function loadExpired() {
+    const data = await apiFetch("/api/watchlist/expired?minutes=30");
+    const section = document.getElementById("expiredSection");
+    const list = document.getElementById("expiredList");
+
+    if (!data || data.length === 0) {
+        section.style.display = "none";
+        return;
+    }
+
+    section.style.display = "block";
+    list.innerHTML = data.map(item => {
+        const coin = item.symbol.split("-")[0];
+        const dir = item.direction === "LONG" ? "↑" : "↓";
+        const reason = item.expire_reason || "Bilinmiyor";
+        const time = item.updated_at ? new Date(item.updated_at).toLocaleTimeString("tr-TR", {hour:"2-digit", minute:"2-digit"}) : "";
+        return `<div class="expired-chip">
+            <span class="chip-coin">${coin} ${dir}</span>
+            <span class="chip-reason">${reason}</span>
+            <span class="chip-time">${time}</span>
+        </div>`;
+    }).join("");
 }
 
 // =================== GEÇMİŞ ===================

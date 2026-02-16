@@ -81,6 +81,8 @@ def init_db():
         conn.execute("ALTER TABLE watchlist ADD COLUMN confirmation_count INTEGER DEFAULT 0")
     if "last_5m_candle_ts" not in existing_cols:
         conn.execute("ALTER TABLE watchlist ADD COLUMN last_5m_candle_ts TEXT")
+    if "expire_reason" not in existing_cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN expire_reason TEXT")
 
     # Optimizasyon logları
     cursor.execute("""
@@ -205,12 +207,20 @@ def add_to_watchlist(symbol, direction, potential_entry, potential_sl, potential
                      watch_reason, initial_score, components, max_watch=3):
     conn = get_db()
     cursor = conn.cursor()
-    # Aynı sembol ve yönde zaten varsa ekleme
+    # Aynı sembol ve yönde zaten izleniyor mu?
     existing = conn.execute("""
         SELECT id FROM watchlist WHERE symbol=? AND direction=? AND status='WATCHING'
     """, (symbol, direction)).fetchone()
     if existing:
         return existing["id"]
+    # Son 15 dk içinde expire edilmişse tekrar ekleme (cooldown)
+    recent_expired = conn.execute("""
+        SELECT id FROM watchlist
+        WHERE symbol=? AND direction=? AND status='EXPIRED'
+          AND updated_at > datetime('now', '-15 minutes')
+    """, (symbol, direction)).fetchone()
+    if recent_expired:
+        return None
     cursor.execute("""
         INSERT INTO watchlist (symbol, direction, potential_entry, potential_sl, potential_tp,
                          watch_reason, candles_watched, confirmation_count, last_5m_candle_ts,
@@ -260,13 +270,25 @@ def promote_watchlist_item(item_id):
     conn.commit()
 
 
-def expire_watchlist_item(item_id):
+def expire_watchlist_item(item_id, reason=None):
     conn = get_db()
     now = datetime.now().isoformat()
     conn.execute("""
-        UPDATE watchlist SET status='EXPIRED', updated_at=? WHERE id=?
-    """, (now, item_id))
+        UPDATE watchlist SET status='EXPIRED', expire_reason=?, updated_at=? WHERE id=?
+    """, (reason, now, item_id))
     conn.commit()
+
+
+def get_recently_expired(minutes=30):
+    """Son N dakikada expire edilen watchlist öğeleri"""
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT * FROM watchlist
+        WHERE status='EXPIRED' AND updated_at > datetime('now', ? || ' minutes')
+        ORDER BY updated_at DESC
+        LIMIT 20
+    """, (str(-minutes),)).fetchall()
+    return [dict(row) for row in rows]
 
 
 # =================== OPTİMİZASYON ===================
