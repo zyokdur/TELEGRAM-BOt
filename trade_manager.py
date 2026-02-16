@@ -23,6 +23,8 @@ class TradeManager:
 
     def __init__(self):
         self.max_concurrent = ICT_PARAMS["max_concurrent_trades"]
+        # Breakeven/Trailing SL takibi: {signal_id: {"breakeven_moved": bool, "trailing_sl": float}}
+        self._trade_state = {}
 
     def process_signal(self, signal_result):
         """
@@ -129,8 +131,10 @@ class TradeManager:
 
     def check_open_trades(self):
         """
-        Açık işlemlerin SL/TP durumunu kontrol et
-        Bu fonksiyon periyodik olarak çalışır
+        Açık işlemlerin SL/TP durumunu kontrol et.
+        İYİLEŞTİRMELER:
+        - Breakeven: Fiyat TP'nin %50'sine ulaşınca SL'yi entry'ye taşı
+        - Trailing SL: Fiyat TP'nin %75'ine ulaşınca SL'yi kârın %50'sinde tut
         """
         active_signals = get_active_signals()
         results = []
@@ -150,9 +154,10 @@ class TradeManager:
             stop_loss = signal["stop_loss"]
             take_profit = signal["take_profit"]
             direction = signal["direction"]
+            signal_id = signal["id"]
 
             result = {
-                "signal_id": signal["id"],
+                "signal_id": signal_id,
                 "symbol": symbol,
                 "direction": direction,
                 "current_price": current_price,
@@ -162,61 +167,132 @@ class TradeManager:
 
             # Seviye doğrulama (ters SL/TP eski sinyalleri temizle)
             if direction == "LONG" and (stop_loss >= entry_price or take_profit <= entry_price):
-                logger.warning(f"⚠️ #{signal['id']} {symbol} LONG ters seviyeler - iptal ediliyor")
-                update_signal_status(signal["id"], "CANCELLED", close_price=current_price, pnl_pct=0)
+                logger.warning(f"⚠️ #{signal_id} {symbol} LONG ters seviyeler - iptal ediliyor")
+                update_signal_status(signal_id, "CANCELLED", close_price=current_price, pnl_pct=0)
+                self._trade_state.pop(signal_id, None)
                 result["status"] = "CANCELLED"
                 results.append(result)
                 continue
             elif direction == "SHORT" and (stop_loss <= entry_price or take_profit >= entry_price):
-                logger.warning(f"⚠️ #{signal['id']} {symbol} SHORT ters seviyeler - iptal ediliyor")
-                update_signal_status(signal["id"], "CANCELLED", close_price=current_price, pnl_pct=0)
+                logger.warning(f"⚠️ #{signal_id} {symbol} SHORT ters seviyeler - iptal ediliyor")
+                update_signal_status(signal_id, "CANCELLED", close_price=current_price, pnl_pct=0)
+                self._trade_state.pop(signal_id, None)
                 result["status"] = "CANCELLED"
                 results.append(result)
                 continue
 
+            # ===== BREAKEVEN / TRAILING SL HESAPLA =====
+            state = self._trade_state.get(signal_id, {"breakeven_moved": False, "trailing_sl": None})
+            effective_sl = stop_loss
+
             if direction == "LONG":
+                total_distance = take_profit - entry_price
+                current_progress = current_price - entry_price
+
+                if total_distance > 0 and current_progress > 0:
+                    progress_pct = current_progress / total_distance
+
+                    # %75'e ulaştıysa → Trailing SL (kârın %50'sini koru)
+                    if progress_pct >= 0.75:
+                        trailing = entry_price + (current_progress * 0.50)
+                        if state["trailing_sl"] is None or trailing > state["trailing_sl"]:
+                            state["trailing_sl"] = trailing
+                            effective_sl = max(effective_sl, trailing)
+                            if not state.get("trailing_logged"):
+                                logger.info(f"📈 #{signal_id} {symbol} TRAILING SL: {trailing:.6f} (kâr koruma)")
+                                state["trailing_logged"] = True
+
+                    # %50'ye ulaştıysa → Breakeven (SL'yi entry'ye taşı)
+                    elif progress_pct >= 0.50 and not state["breakeven_moved"]:
+                        state["breakeven_moved"] = True
+                        effective_sl = entry_price * 1.001  # Küçük buffer
+                        logger.info(f"🔒 #{signal_id} {symbol} BREAKEVEN: SL → {effective_sl:.6f}")
+
+                    if state["trailing_sl"]:
+                        effective_sl = max(effective_sl, state["trailing_sl"])
+
                 # TP kontrolü
                 if current_price >= take_profit:
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    update_signal_status(signal["id"], "WON", close_price=current_price, pnl_pct=pnl_pct)
+                    update_signal_status(signal_id, "WON", close_price=current_price, pnl_pct=pnl_pct)
+                    self._trade_state.pop(signal_id, None)
                     result["status"] = "WON"
                     result["pnl_pct"] = round(pnl_pct, 2)
-                    logger.info(f"🏆 KAZANDIK: #{signal['id']} {symbol} LONG | PnL: +{pnl_pct:.2f}%")
+                    logger.info(f"🏆 KAZANDIK: #{signal_id} {symbol} LONG | PnL: +{pnl_pct:.2f}%")
 
-                # SL kontrolü
-                elif current_price <= stop_loss:
+                # SL kontrolü (effective_sl kullan)
+                elif current_price <= effective_sl:
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
-                    update_signal_status(signal["id"], "LOST", close_price=current_price, pnl_pct=pnl_pct)
-                    result["status"] = "LOST"
+                    sl_type = "TRAILING_SL" if state.get("trailing_sl") else ("BREAKEVEN" if state["breakeven_moved"] else "SL")
+                    status = "WON" if pnl_pct > 0 else "LOST"
+                    update_signal_status(signal_id, status, close_price=current_price, pnl_pct=pnl_pct)
+                    self._trade_state.pop(signal_id, None)
+                    result["status"] = status
                     result["pnl_pct"] = round(pnl_pct, 2)
-                    logger.info(f"❌ KAYBETTİK: #{signal['id']} {symbol} LONG | PnL: {pnl_pct:.2f}%")
+                    emoji = "🏆" if pnl_pct > 0 else "❌"
+                    logger.info(f"{emoji} {sl_type}: #{signal_id} {symbol} LONG | PnL: {pnl_pct:+.2f}%")
 
                 else:
-                    # Aktif PnL hesapla
                     unrealized_pnl = ((current_price - entry_price) / entry_price) * 100
                     result["unrealized_pnl"] = round(unrealized_pnl, 2)
+                    if state["breakeven_moved"] or state.get("trailing_sl"):
+                        result["effective_sl"] = round(effective_sl, 8)
 
             elif direction == "SHORT":
+                total_distance = entry_price - take_profit
+                current_progress = entry_price - current_price
+
+                if total_distance > 0 and current_progress > 0:
+                    progress_pct = current_progress / total_distance
+
+                    # %75'e ulaştıysa → Trailing SL
+                    if progress_pct >= 0.75:
+                        trailing = entry_price - (current_progress * 0.50)
+                        if state["trailing_sl"] is None or trailing < state["trailing_sl"]:
+                            state["trailing_sl"] = trailing
+                            effective_sl = min(effective_sl, trailing)
+                            if not state.get("trailing_logged"):
+                                logger.info(f"📉 #{signal_id} {symbol} TRAILING SL: {trailing:.6f} (kâr koruma)")
+                                state["trailing_logged"] = True
+
+                    # %50'ye ulaştıysa → Breakeven
+                    elif progress_pct >= 0.50 and not state["breakeven_moved"]:
+                        state["breakeven_moved"] = True
+                        effective_sl = entry_price * 0.999
+                        logger.info(f"🔒 #{signal_id} {symbol} BREAKEVEN: SL → {effective_sl:.6f}")
+
+                    if state["trailing_sl"]:
+                        effective_sl = min(effective_sl, state["trailing_sl"])
+
                 # TP kontrolü
                 if current_price <= take_profit:
                     pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                    update_signal_status(signal["id"], "WON", close_price=current_price, pnl_pct=pnl_pct)
+                    update_signal_status(signal_id, "WON", close_price=current_price, pnl_pct=pnl_pct)
+                    self._trade_state.pop(signal_id, None)
                     result["status"] = "WON"
                     result["pnl_pct"] = round(pnl_pct, 2)
-                    logger.info(f"🏆 KAZANDIK: #{signal['id']} {symbol} SHORT | PnL: +{pnl_pct:.2f}%")
+                    logger.info(f"🏆 KAZANDIK: #{signal_id} {symbol} SHORT | PnL: +{pnl_pct:.2f}%")
 
-                # SL kontrolü
-                elif current_price >= stop_loss:
+                # SL kontrolü (effective_sl kullan)
+                elif current_price >= effective_sl:
                     pnl_pct = ((entry_price - current_price) / entry_price) * 100
-                    update_signal_status(signal["id"], "LOST", close_price=current_price, pnl_pct=pnl_pct)
-                    result["status"] = "LOST"
+                    sl_type = "TRAILING_SL" if state.get("trailing_sl") else ("BREAKEVEN" if state["breakeven_moved"] else "SL")
+                    status = "WON" if pnl_pct > 0 else "LOST"
+                    update_signal_status(signal_id, status, close_price=current_price, pnl_pct=pnl_pct)
+                    self._trade_state.pop(signal_id, None)
+                    result["status"] = status
                     result["pnl_pct"] = round(pnl_pct, 2)
-                    logger.info(f"❌ KAYBETTİK: #{signal['id']} {symbol} SHORT | PnL: {pnl_pct:.2f}%")
+                    emoji = "🏆" if pnl_pct > 0 else "❌"
+                    logger.info(f"{emoji} {sl_type}: #{signal_id} {symbol} SHORT | PnL: {pnl_pct:+.2f}%")
 
                 else:
                     unrealized_pnl = ((entry_price - current_price) / entry_price) * 100
                     result["unrealized_pnl"] = round(unrealized_pnl, 2)
+                    if state["breakeven_moved"] or state.get("trailing_sl"):
+                        result["effective_sl"] = round(effective_sl, 8)
 
+            # State'i kaydet
+            self._trade_state[signal_id] = state
             results.append(result)
 
         return results

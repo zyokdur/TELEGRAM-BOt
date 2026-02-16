@@ -14,7 +14,7 @@
 import numpy as np
 import pandas as pd
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from config import ICT_PARAMS
 from database import get_bot_param
 
@@ -38,6 +38,77 @@ class ICTStrategy:
     def reload_params(self):
         """Parametreleri yeniden yükle (optimizer güncellemesi sonrası)"""
         self.params = self._load_params()
+
+    # =================== SESSION / KILLZONE ===================
+
+    def get_session_info(self):
+        """
+        ICT Killzone (oturum) bilgisini hesapla.
+        Kurumsal aktivite belirli saatlerde yoğunlaşır:
+        - Asian Session:  00:00-08:00 UTC (düşük volatilite, likidite oluşumu)
+        - London Killzone: 07:00-10:00 UTC (yüksek volatilite, ana harekeler)
+        - NY Killzone:     12:00-15:00 UTC (yüksek volatilite, trend devamı)
+        - London Close:    15:00-17:00 UTC (geri çekilmeler)
+        - Off-hours:       17:00-00:00 UTC (düşük volatilite)
+        """
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+
+        if 7 <= hour < 10:
+            return {"session": "LONDON_KILLZONE", "quality": 1.0, "label": "London Killzone"}
+        elif 12 <= hour < 15:
+            return {"session": "NY_KILLZONE", "quality": 1.0, "label": "NY Killzone"}
+        elif 10 <= hour < 12:
+            return {"session": "LONDON_NY_OVERLAP_PREP", "quality": 0.8, "label": "London-NY Geçiş"}
+        elif 15 <= hour < 17:
+            return {"session": "LONDON_CLOSE", "quality": 0.7, "label": "London Kapanış"}
+        elif 0 <= hour < 7:
+            return {"session": "ASIAN", "quality": 0.5, "label": "Asya Oturumu"}
+        else:
+            return {"session": "OFF_HOURS", "quality": 0.3, "label": "Düşük Aktivite"}
+
+    # =================== RANGING MARKET TESPİTİ ===================
+
+    def detect_ranging_market(self, df, lookback=20):
+        """
+        Yatay (ranging) piyasayı tespit et.
+        Range-bound piyasalarda ICT sinyalleri düşük kalitelidir.
+        ADX benzeri bir volatilite kontrolü uygular.
+        Returns: True = ranging (sinyal üretme), False = trending (sinyal üret)
+        """
+        if len(df) < lookback:
+            return False
+
+        recent = df.tail(lookback)
+        highs = recent["high"].values
+        lows = recent["low"].values
+        closes = recent["close"].values
+
+        # 1. ATR bazlı volatilite (ortalama range vs fiyat)
+        avg_range = np.mean(highs - lows)
+        avg_price = np.mean(closes)
+        range_pct = avg_range / avg_price if avg_price > 0 else 0
+
+        # 2. Net hareket / Toplam hareket oranı (efficiency ratio)
+        net_move = abs(closes[-1] - closes[0])
+        total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
+        efficiency = net_move / total_move if total_move > 0 else 0
+
+        # 3. High-Low range genişliği kontrolü
+        max_high = np.max(highs)
+        min_low = np.min(lows)
+        total_range_pct = (max_high - min_low) / avg_price if avg_price > 0 else 0
+
+        # Ranging koşulları:
+        # - Efficiency çok düşükse (fiyat ileri geri gidip geliyor)
+        # - Toplam range dar ve volatilite düşükse
+        is_ranging = (efficiency < 0.15 and total_range_pct < 0.02) or \
+                     (efficiency < 0.10)
+
+        if is_ranging:
+            logger.debug(f"  📊 Ranging market tespit edildi: eff={efficiency:.3f}, range={total_range_pct:.4f}")
+
+        return is_ranging
 
     # =================== MARKET STRUCTURE ===================
 
@@ -295,7 +366,56 @@ class ICTStrategy:
 
         # Sadece henüz mitigate olmamış OB'leri döndür
         active_obs = [ob for ob in order_blocks if not ob["mitigated"]]
-        return active_obs
+        return active_obs, order_blocks  # Hem aktif hem tüm OB'leri döndür
+
+    # =================== BREAKER BLOCKS ===================
+
+    def find_breaker_blocks(self, all_order_blocks, df):
+        """
+        Breaker Block tespiti:
+        Mitigate olmuş bir OB, karşı yönde güçlü bir destek/direnç haline gelir.
+        - Mitigated Bullish OB → Bearish Breaker (direnç)
+        - Mitigated Bearish OB → Bullish Breaker (destek)
+        Bu ICT'de yüksek olasılıklı trade setup'larından biridir.
+        """
+        breaker_blocks = []
+        current_price = df["close"].iloc[-1]
+        current_idx = len(df) - 1
+
+        for ob in all_order_blocks:
+            if not ob["mitigated"]:
+                continue
+
+            # Çok eski breaker'ları atla (max 40 mum)
+            if current_idx - ob["index"] > 40:
+                continue
+
+            if ob["type"] == "BULLISH_OB":
+                # Mitigated Bullish OB → Bearish Breaker (direnç olarak çalışır)
+                # Fiyat bu bölgeye yaklaşırsa SHORT sinyali güçlenir
+                if current_price >= ob["low"] * 0.998 and current_price <= ob["high"] * 1.005:
+                    breaker_blocks.append({
+                        "type": "BEARISH_BREAKER",
+                        "high": ob["high"],
+                        "low": ob["low"],
+                        "index": ob["index"],
+                        "timestamp": ob["timestamp"],
+                        "original_ob": "BULLISH_OB"
+                    })
+
+            elif ob["type"] == "BEARISH_OB":
+                # Mitigated Bearish OB → Bullish Breaker (destek olarak çalışır)
+                if current_price >= ob["low"] * 0.995 and current_price <= ob["high"] * 1.002:
+                    breaker_blocks.append({
+                        "type": "BULLISH_BREAKER",
+                        "high": ob["high"],
+                        "low": ob["low"],
+                        "index": ob["index"],
+                        "timestamp": ob["timestamp"],
+                        "original_ob": "BEARISH_OB"
+                    })
+
+        return breaker_blocks
 
     # =================== FAIR VALUE GAPS ===================
 
@@ -544,13 +664,33 @@ class ICTStrategy:
 
     def calculate_confluence(self, df, multi_tf_data=None):
         """
-        Tüm ICT konseptlerini analiz edip confluent skor hesapla
-        Her bileşene ağırlıklı puan vererek toplam skor üret
+        Tüm ICT konseptlerini analiz edip confluent skor hesapla.
+        
+        İYİLEŞTİRMELER:
+        - Session/Killzone ağırlığı
+        - Breaker Block tespiti
+        - Recency weighting (yeni OB/FVG daha değerli)
+        - Displacement zorunluluğu güçlendirildi
+        - Ranging market cezası
+        - HTF + MTF çift onay
+        - WEAKENING trend cezası
         """
         analysis = {}
         components_triggered = []
         score = 0
         max_score = 0
+        penalties = []
+
+        current_price = df["close"].iloc[-1]
+        current_idx = len(df) - 1
+
+        # ===== RANGING MARKET KONTROLÜ =====
+        is_ranging = self.detect_ranging_market(df)
+        analysis["is_ranging"] = is_ranging
+
+        # ===== SESSION / KILLZONE =====
+        session_info = self.get_session_info()
+        analysis["session"] = session_info
 
         # 1. Market Structure Analizi (25 puan)
         structure = self.detect_market_structure(df)
@@ -562,38 +702,65 @@ class ICTStrategy:
             score += weight_structure
             components_triggered.append("MARKET_STRUCTURE")
         elif structure["trend"] in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
-            score += weight_structure * 0.4
+            # WEAKENING trendler daha düşük puan (tam onay yok)
+            score += weight_structure * 0.3
+            penalties.append("WEAKENING_TREND(-7)")
 
-        # 2. Order Blocks (20 puan)
-        order_blocks = self.find_order_blocks(df, structure)
-        analysis["order_blocks"] = order_blocks
+        # 2. Order Blocks (20 puan) + Recency Weighting
+        active_obs, all_obs_raw = self.find_order_blocks(df, structure)
+        analysis["order_blocks"] = active_obs
+        analysis["all_order_blocks"] = all_obs_raw
         weight_ob = 20
         max_score += weight_ob
 
-        current_price = df["close"].iloc[-1]
         relevant_obs = []
-        for ob in order_blocks:
+        for ob in active_obs:
+            # Recency weighting: Son 10 mumda oluşan OB'ler daha değerli
+            recency_factor = 1.0
+            age = current_idx - ob["index"]
+            if age <= 5:
+                recency_factor = 1.0
+            elif age <= 15:
+                recency_factor = 0.8
+            elif age <= 25:
+                recency_factor = 0.6
+            else:
+                recency_factor = 0.4
+
             if ob["type"] == "BULLISH_OB" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                # Fiyat bullish OB'ye yakın mı?
                 if ob["low"] <= current_price <= ob["high"] * 1.005:
                     relevant_obs.append(ob)
-                    score += weight_ob
+                    score += weight_ob * recency_factor
                     components_triggered.append("ORDER_BLOCK")
                     break
                 elif current_price < ob["high"] * 1.02 and current_price > ob["low"] * 0.99:
-                    score += weight_ob * 0.5
+                    score += weight_ob * 0.4 * recency_factor
             elif ob["type"] == "BEARISH_OB" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
                 if ob["low"] <= current_price <= ob["high"] * 1.005:
                     relevant_obs.append(ob)
-                    score += weight_ob
+                    score += weight_ob * recency_factor
                     components_triggered.append("ORDER_BLOCK")
                     break
                 elif current_price > ob["low"] * 0.98 and current_price < ob["high"] * 1.01:
-                    score += weight_ob * 0.5
+                    score += weight_ob * 0.4 * recency_factor
 
         analysis["relevant_obs"] = relevant_obs
 
-        # 3. Fair Value Gaps (15 puan)
+        # 2b. Breaker Blocks (7 bonus puan)
+        breaker_blocks = self.find_breaker_blocks(all_obs_raw, df)
+        analysis["breaker_blocks"] = breaker_blocks
+
+        for bb in breaker_blocks:
+            if bb["type"] == "BULLISH_BREAKER" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
+                score += 7
+                components_triggered.append("BREAKER_BLOCK")
+                break
+            elif bb["type"] == "BEARISH_BREAKER" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
+                score += 7
+                components_triggered.append("BREAKER_BLOCK")
+                break
+
+        # 3. Fair Value Gaps (15 puan) + Recency Weighting
         fvgs = self.find_fvg(df)
         analysis["fvgs"] = fvgs
         weight_fvg = 15
@@ -601,16 +768,20 @@ class ICTStrategy:
 
         relevant_fvgs = []
         for fvg in fvgs:
+            # Recency weighting
+            fvg_age = current_idx - fvg["index"]
+            fvg_recency = 1.0 if fvg_age <= 8 else (0.7 if fvg_age <= 15 else 0.4)
+
             if fvg["type"] == "BULLISH_FVG" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
                 if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
                     relevant_fvgs.append(fvg)
-                    score += weight_fvg
+                    score += weight_fvg * fvg_recency
                     components_triggered.append("FVG")
                     break
             elif fvg["type"] == "BEARISH_FVG" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
                 if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
                     relevant_fvgs.append(fvg)
-                    score += weight_fvg
+                    score += weight_fvg * fvg_recency
                     components_triggered.append("FVG")
                     break
 
@@ -633,20 +804,28 @@ class ICTStrategy:
                     components_triggered.append("LIQUIDITY_SWEEP")
                     break
 
-        # 5. Displacement (10 puan)
+        # 5. Displacement (15 puan → önem artırıldı, ICT'de kritik onay)
         displacements = self.detect_displacement(df)
         analysis["displacements"] = displacements
-        weight_disp = 10
+        weight_disp = 15  # 10'dan 15'e çıkarıldı
         max_score += weight_disp
 
+        has_displacement = False
         if displacements:
             last_disp = displacements[-1]
             if last_disp["direction"] == "BULLISH" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
                 score += weight_disp
                 components_triggered.append("DISPLACEMENT")
+                has_displacement = True
             elif last_disp["direction"] == "BEARISH" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
                 score += weight_disp
                 components_triggered.append("DISPLACEMENT")
+                has_displacement = True
+
+        # Displacement yoksa ceza (kurumsal aktivite onayı eksik)
+        if not has_displacement:
+            penalties.append("NO_DISPLACEMENT(-8)")
+            score -= 8
 
         # 6. Premium/Discount (15 puan)
         pd_zone = self.calculate_premium_discount(df, structure)
@@ -668,14 +847,56 @@ class ICTStrategy:
                     components_triggered.append("OTE")
                 components_triggered.append("PREMIUM_ZONE")
 
-        # HTF onayı (Multi-timeframe varsa bonus)
-        if multi_tf_data and "4H" in multi_tf_data and not multi_tf_data["4H"].empty:
-            htf_structure = self.detect_market_structure(multi_tf_data["4H"])
-            if htf_structure["trend"] == structure["trend"]:
-                score += 5  # Bonus
-                components_triggered.append("HTF_CONFIRMATION")
+        # ===== HTF + MTF ÇİFT ONAY (iyileştirildi) =====
+        htf_aligned = False
+        mtf_aligned = False
 
-        # Normalize et (0-100)
+        if multi_tf_data:
+            # 4H (HTF) onayı → +5 bonus
+            if "4H" in multi_tf_data and not multi_tf_data["4H"].empty:
+                htf_structure = self.detect_market_structure(multi_tf_data["4H"])
+                analysis["htf_trend"] = htf_structure["trend"]
+                if htf_structure["trend"] == structure["trend"]:
+                    htf_aligned = True
+                    score += 5
+                    components_triggered.append("HTF_CONFIRMATION")
+                elif htf_structure["trend"] in ["BULLISH", "BEARISH"] and \
+                     htf_structure["trend"] != structure["trend"] and \
+                     structure["trend"] in ["BULLISH", "BEARISH"]:
+                    # HTF trend karşı yönde → ciddi ceza
+                    score -= 10
+                    penalties.append("HTF_COUNTER_TREND(-10)")
+
+            # 1H (MTF) onayı → +3 bonus
+            if "1H" in multi_tf_data and not multi_tf_data["1H"].empty:
+                mtf_structure = self.detect_market_structure(multi_tf_data["1H"])
+                analysis["mtf_trend"] = mtf_structure["trend"]
+                if mtf_structure["trend"] == structure["trend"]:
+                    mtf_aligned = True
+                    score += 3
+                    components_triggered.append("MTF_CONFIRMATION")
+
+        # Triple timeframe alignment bonus
+        if htf_aligned and mtf_aligned:
+            score += 3
+            components_triggered.append("TRIPLE_TF_ALIGNMENT")
+
+        # ===== SESSION QUALITY BONUSU =====
+        session_quality = session_info["quality"]
+        if session_quality >= 0.8:
+            score += 5
+            components_triggered.append("KILLZONE_ACTIVE")
+        elif session_quality <= 0.3:
+            penalties.append("OFF_HOURS(-5)")
+            score -= 5
+
+        # ===== RANGING MARKET CEZASI =====
+        if is_ranging:
+            score -= 15
+            penalties.append("RANGING_MARKET(-15)")
+
+        # Normalize et (0-100), minimum 0
+        score = max(0, score)
         confluence_score = min(100, round((score / max_score) * 100, 1)) if max_score > 0 else 0
 
         # Yön belirle
@@ -688,6 +909,7 @@ class ICTStrategy:
         analysis["confluence_score"] = confluence_score
         analysis["direction"] = direction
         analysis["components"] = list(set(components_triggered))
+        analysis["penalties"] = penalties
         analysis["current_price"] = current_price
 
         return analysis
@@ -713,6 +935,11 @@ class ICTStrategy:
         min_confidence = self.params["min_confidence"]
 
         if direction is None:
+            return None
+
+        # Ranging market kontrolü → sinyal üretme
+        if analysis.get("is_ranging"):
+            logger.debug(f"  {symbol} ranging market - sinyal üretilmiyor")
             return None
 
         # Güven skoru hesapla (confluence + ek faktörler)
@@ -766,6 +993,8 @@ class ICTStrategy:
             "confluence_score": confluence_score,
             "confidence": confidence,
             "components": analysis["components"],
+            "penalties": analysis.get("penalties", []),
+            "session": analysis.get("session", {}).get("label", ""),
             "rr_ratio": round(rr_ratio, 2),
             "entry_type": self._get_entry_type(analysis, entry, current_price, direction),
             "sl_type": self._get_sl_type(analysis, sl, direction),
@@ -776,8 +1005,9 @@ class ICTStrategy:
         # Sinyal mi, izleme mi?
         if confluence_score >= min_confluence and confidence >= min_confidence:
             result["action"] = "SIGNAL"
+            session_label = analysis.get("session", {}).get("label", "")
             logger.info(f"🎯 SİNYAL: {symbol} {direction} | Entry: {entry} | SL: {sl} | TP: {tp} | "
-                       f"Conf: {confidence}% | Score: {confluence_score}")
+                       f"Conf: {confidence}% | Score: {confluence_score} | Session: {session_label}")
         elif confluence_score >= min_confluence * 0.7:
             result["action"] = "WATCH"
             result["watch_reason"] = self._get_watch_reason(analysis)
@@ -791,34 +1021,83 @@ class ICTStrategy:
     def _calculate_confidence(self, analysis):
         """
         Güven skoru hesapla (0-100)
-        Confluence + ek kalite faktörleri
+        Confluence + ek kalite faktörleri + CEZA SİSTEMİ
+        
+        Eksik kritik bileşenler ceza alır:
+        - Displacement yoksa: -10
+        - OB veya FVG yoksa: -5
+        - Uygun bölgede değilse: -5
+        - Ranging market: -10
         """
         base = analysis["confluence_score"]
-
-        # Ek faktörler
         bonus = 0
+        penalty = 0
 
+        components = analysis["components"]
+        penalties = analysis.get("penalties", [])
+
+        # === BONUSLAR ===
         # Birden fazla bileşen tetiklendiyse güven artar
-        comp_count = len(analysis["components"])
-        if comp_count >= 4:
-            bonus += 10
+        comp_count = len(components)
+        if comp_count >= 5:
+            bonus += 12
+        elif comp_count >= 4:
+            bonus += 8
         elif comp_count >= 3:
-            bonus += 5
+            bonus += 4
 
         # Güçlü trend varsa bonus
         structure = analysis["structure"]
         if structure["trend"] in ["BULLISH", "BEARISH"]:
             bonus += 5
-        
+
         # Displacement varsa bonus
-        if "DISPLACEMENT" in analysis["components"]:
+        if "DISPLACEMENT" in components:
             bonus += 5
 
         # HTF onayı varsa bonus
-        if "HTF_CONFIRMATION" in analysis["components"]:
+        if "HTF_CONFIRMATION" in components:
             bonus += 5
 
-        confidence = min(100, base + bonus)
+        # Triple TF alignment → ekstra bonus
+        if "TRIPLE_TF_ALIGNMENT" in components:
+            bonus += 5
+
+        # Killzone aktifse bonus
+        if "KILLZONE_ACTIVE" in components:
+            bonus += 3
+
+        # Breaker Block varsa bonus
+        if "BREAKER_BLOCK" in components:
+            bonus += 5
+
+        # === CEZALAR ===
+        # Displacement yoksa → kurumsal aktivite onayı eksik
+        if "DISPLACEMENT" not in components:
+            penalty += 10
+
+        # OB ve FVG ikisi de yoksa → giriş noktası belirsiz
+        if "ORDER_BLOCK" not in components and "FVG" not in components:
+            penalty += 8
+
+        # Uygun bölgede değilse
+        if "DISCOUNT_ZONE" not in components and "PREMIUM_ZONE" not in components and "OTE" not in components:
+            penalty += 5
+
+        # WEAKENING trend cezası
+        if structure["trend"] in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
+            penalty += 5
+
+        # Ranging market cezası
+        if analysis.get("is_ranging"):
+            penalty += 10
+
+        # Off-hours cezası
+        session = analysis.get("session", {})
+        if session.get("quality", 1.0) <= 0.3:
+            penalty += 5
+
+        confidence = max(0, min(100, base + bonus - penalty))
         return round(confidence, 1)
 
     def _calculate_levels(self, analysis, df):
@@ -1164,6 +1443,7 @@ class ICTStrategy:
         """İzleme sebebini açıkla"""
         reasons = []
         components = analysis["components"]
+        penalties = analysis.get("penalties", [])
 
         if "MARKET_STRUCTURE" not in components:
             reasons.append("Yapı onayı bekleniyor")
@@ -1173,11 +1453,20 @@ class ICTStrategy:
             reasons.append("FVG dolumu bekleniyor")
         if "DISPLACEMENT" not in components:
             reasons.append("Displacement bekleniyor")
+        if "HTF_CONFIRMATION" not in components and "MTF_CONFIRMATION" not in components:
+            reasons.append("MTF/HTF onayı bekleniyor")
+
+        # Ceza sebeplerini ekle
+        for p in penalties:
+            if "OFF_HOURS" in p:
+                reasons.append("Killzone dışı saat")
+            elif "RANGING" in p:
+                reasons.append("Yatay piyasa")
 
         if not reasons:
             reasons.append("Güven skoru düşük, onay bekleniyor")
 
-        return " | ".join(reasons[:2])
+        return " | ".join(reasons[:3])
 
     def _get_entry_type(self, analysis, entry, current_price, direction):
         """Entry seviyesinin ICT kaynağını belirle"""
