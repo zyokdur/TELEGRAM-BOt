@@ -352,18 +352,18 @@ def add_to_watchlist(symbol, direction, potential_entry, potential_sl, potential
     if existing:
         return existing["id"]
 
-    # Son 15 dk içinde expire edilmişse tekrar ekleme (cooldown)
+    # Son 60 dk içinde expire edilmişse tekrar ekleme (uzun cooldown — flip-flop engeli)
     if USE_POSTGRES:
         recent = _fetchone("""
             SELECT id FROM watchlist
             WHERE symbol=? AND direction=? AND status='EXPIRED'
-              AND updated_at > NOW() - INTERVAL '15 minutes'
+              AND updated_at > NOW() - INTERVAL '60 minutes'
         """, (symbol, direction))
     else:
         recent = _fetchone("""
             SELECT id FROM watchlist
             WHERE symbol=? AND direction=? AND status='EXPIRED'
-              AND updated_at > datetime('now', '-15 minutes')
+              AND updated_at > datetime('now', '-60 minutes')
         """, (symbol, direction))
 
     if recent:

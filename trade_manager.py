@@ -192,6 +192,11 @@ class TradeManager:
 
     def _add_to_watch(self, signal):
         """İzleme listesine ekle (5m onay akışı)."""
+        # Çok düşük skorlu sinyalleri izlemeye bile alma (flip-flop engel)
+        if signal.get("confluence_score", 0) < 20:
+            logger.debug(f"⏭️ {signal['symbol']} skor çok düşük ({signal['confluence_score']}), izlemeye alınmadı")
+            return None
+
         watch_candles = WATCH_CONFIRM_CANDLES
         watch_id = add_to_watchlist(
             symbol=signal["symbol"],
@@ -618,11 +623,11 @@ class TradeManager:
                 )
                 continue
 
-            # Score çok düşerse erken expire
-            if new_score < item["initial_score"] * 0.5:
+            # Score çok düşerse erken expire (eşik: başlangıcın %35'inin altı)
+            if new_score < item["initial_score"] * 0.35:
                 expire_watchlist_item(
                     item["id"],
-                    reason=f"Skor düştü ({item['initial_score']:.0f} → {new_score:.0f})"
+                    reason=f"Skor çok düştü ({item['initial_score']:.0f} → {new_score:.0f})"
                 )
                 logger.info(f"📉 İZLEME SKOR DÜŞTÜ: {symbol} | {item['initial_score']} → {new_score}")
                 continue
