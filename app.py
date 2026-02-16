@@ -434,6 +434,38 @@ def handle_request_update():
 
 # =================== BAŞLATMA ===================
 
+import os
+
+# Render/Gunicorn ile çalışırken de DB'yi başlat
+init_db()
+logger.info("ICT Trading Bot v1.0 - Veritabanı hazır")
+
+# Render'da otomatik başlat (gunicorn ile)
+if os.environ.get("RENDER"):
+    # Render ortamında botu otomatik başlat
+    import atexit
+    def auto_start_bot():
+        """Gunicorn worker başladığında botu otomatik başlat"""
+        if not bot_state["running"]:
+            bot_state["running"] = True
+            create_scheduler()
+            scheduler.add_job(scan_markets, "interval", seconds=SCAN_INTERVAL_SECONDS,
+                             id="scan_markets", replace_existing=True)
+            scheduler.add_job(check_trades, "interval", seconds=TRADE_CHECK_INTERVAL,
+                             id="check_trades", replace_existing=True)
+            scheduler.add_job(run_optimizer, "interval",
+                             minutes=OPTIMIZER_CONFIG["optimization_interval_minutes"],
+                             id="run_optimizer", replace_existing=True)
+            scheduler.start()
+            threading.Thread(target=scan_markets, daemon=True).start()
+            logger.info("🚀 Bot Render'da otomatik başlatıldı!")
+
+    # İlk request'te değil, uygulama başlarken çalıştır
+    auto_start_timer = threading.Timer(5.0, auto_start_bot)
+    auto_start_timer.daemon = True
+    auto_start_timer.start()
+
+
 if __name__ == "__main__":
     logger.info("=" * 60)
     logger.info("  ICT Trading Bot v1.0 - GERÇEK VERİ")
@@ -444,10 +476,8 @@ if __name__ == "__main__":
     logger.info(f"  Web arayüz: http://localhost:{PORT}")
     logger.info("=" * 60)
 
-    # İlk coin listesini çek
     coins = data_fetcher.get_high_volume_coins(force_refresh=True)
     logger.info(f"  Başlangıç: {len(coins)} coin 5M+ hacimle tespit edildi")
     logger.info("=" * 60)
 
-    init_db()
     socketio.run(app, host=HOST, port=PORT, debug=DEBUG)
