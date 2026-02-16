@@ -787,22 +787,44 @@ class ICTStrategy:
 
         analysis["relevant_fvgs"] = relevant_fvgs
 
-        # 4. Liquidity (15 puan)
+        # 4. Liquidity + Sweep-MSS A+ Setup (15 puan)
         liquidity = self.find_liquidity_levels(df)
         analysis["liquidity"] = liquidity
         weight_liq = 15
         max_score += weight_liq
 
+        sweep_mss_detected = False
         for liq in liquidity:
             if liq["swept"]:
                 if liq["type"] == "EQUAL_LOWS" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
                     score += weight_liq
                     components_triggered.append("LIQUIDITY_SWEEP")
+
+                    # A+ Setup: Sweep sonrası MSS (BOS/CHoCH) var mı?
+                    sweep_idx = max(liq["indices"])
+                    for bos in structure.get("bos_events", []) + structure.get("choch_events", []):
+                        if bos["index"] > sweep_idx and "BULLISH" in bos["type"]:
+                            sweep_mss_detected = True
+                            break
                     break
+
                 elif liq["type"] == "EQUAL_HIGHS" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
                     score += weight_liq
                     components_triggered.append("LIQUIDITY_SWEEP")
+
+                    sweep_idx = max(liq["indices"])
+                    for bos in structure.get("bos_events", []) + structure.get("choch_events", []):
+                        if bos["index"] > sweep_idx and "BEARISH" in bos["type"]:
+                            sweep_mss_detected = True
+                            break
                     break
+
+        # Sweep + MSS = A+ Setup → ekstra 10 bonus
+        if sweep_mss_detected:
+            score += 10
+            components_triggered.append("SWEEP_MSS_A_PLUS")
+            logger.debug(f"  🅰️ A+ SETUP: Likidite sweep + MSS tespit edildi")
+        analysis["sweep_mss"] = sweep_mss_detected
 
         # 5. Displacement (15 puan → önem artırıldı, ICT'de kritik onay)
         displacements = self.detect_displacement(df)
@@ -847,25 +869,33 @@ class ICTStrategy:
                     components_triggered.append("OTE")
                 components_triggered.append("PREMIUM_ZONE")
 
-        # ===== HTF + MTF ÇİFT ONAY (iyileştirildi) =====
+        # ===== HTF BIAS HARD FİLTRE + MTF ONAY =====
         htf_aligned = False
         mtf_aligned = False
+        htf_bias_block = False   # HTF karşı yöndeyse sinyali tamamen engelle
 
         if multi_tf_data:
-            # 4H (HTF) onayı → +5 bonus
+            # 4H (HTF) — "Bias" belirler, LTF buna uymalı
             if "4H" in multi_tf_data and not multi_tf_data["4H"].empty:
                 htf_structure = self.detect_market_structure(multi_tf_data["4H"])
+                htf_liquidity = self.find_liquidity_levels(multi_tf_data["4H"])
                 analysis["htf_trend"] = htf_structure["trend"]
+                analysis["htf_structure"] = htf_structure
+                analysis["htf_liquidity"] = htf_liquidity
+
                 if htf_structure["trend"] == structure["trend"]:
                     htf_aligned = True
                     score += 5
                     components_triggered.append("HTF_CONFIRMATION")
                 elif htf_structure["trend"] in ["BULLISH", "BEARISH"] and \
-                     htf_structure["trend"] != structure["trend"] and \
-                     structure["trend"] in ["BULLISH", "BEARISH"]:
-                    # HTF trend karşı yönde → ciddi ceza
-                    score -= 10
-                    penalties.append("HTF_COUNTER_TREND(-10)")
+                     structure["trend"] in ["BULLISH", "BEARISH"] and \
+                     htf_structure["trend"] != structure["trend"]:
+                    # 4H BEARISH iken LTF LONG → HARD BLOCK
+                    # 4H BULLISH iken LTF SHORT → HARD BLOCK
+                    htf_bias_block = True
+                    score -= 15
+                    penalties.append("HTF_BIAS_BLOCK(-15)")
+                    logger.debug(f"  ⛔ HTF Bias Block: 4H={htf_structure['trend']} vs LTF={structure['trend']}")
 
             # 1H (MTF) onayı → +3 bonus
             if "1H" in multi_tf_data and not multi_tf_data["1H"].empty:
@@ -875,6 +905,8 @@ class ICTStrategy:
                     mtf_aligned = True
                     score += 3
                     components_triggered.append("MTF_CONFIRMATION")
+
+        analysis["htf_bias_block"] = htf_bias_block
 
         # Triple timeframe alignment bonus
         if htf_aligned and mtf_aligned:
@@ -935,6 +967,13 @@ class ICTStrategy:
         min_confidence = self.params["min_confidence"]
 
         if direction is None:
+            return None
+
+        # ===== HTF BIAS HARD FİLTRE =====
+        # 4H trend karşı yöndeyse → işlem açma, boşuna SL yeme
+        if analysis.get("htf_bias_block"):
+            htf_trend = analysis.get("htf_trend", "?")
+            logger.debug(f"  ⛔ {symbol} HTF Bias Block: 4H={htf_trend} vs sinyal={direction}")
             return None
 
         # Ranging market kontrolü → sinyal üretme
@@ -1070,6 +1109,14 @@ class ICTStrategy:
         # Breaker Block varsa bonus
         if "BREAKER_BLOCK" in components:
             bonus += 5
+
+        # Sweep + MSS (A+ Setup) varsa → en güçlü sinyal
+        if "SWEEP_MSS_A_PLUS" in components:
+            bonus += 10
+
+        # HTF Bias Block → ciddi ceza
+        if analysis.get("htf_bias_block"):
+            penalty += 15
 
         # === CEZALAR ===
         # Displacement yoksa → kurumsal aktivite onayı eksik
@@ -1317,16 +1364,24 @@ class ICTStrategy:
 
     def _calc_long_tp(self, analysis, df, entry, sl):
         """
-        LONG TP - ICT yapısal hedefler (sabit R:R KULLANILMAZ):
-        1. Karşı taraf likiditesi (equal highs / sell-side liquidity)
-        2. Bearish Order Block seviyesi (karşı OB)
-        3. Son swing high (yapısal direnç)
-        4. Fallback: Son çare olarak R:R bazlı minimum hedef
+        LONG TP - ICT Draw on Liquidity (karşı likiditeyi hedefle):
+        1. HTF (4H) karşı likiditesi (en güçlü mıknatıs)
+        2. LTF karşı taraf likiditesi (equal highs)
+        3. Bearish Order Block seviyesi (karşı OB)
+        4. Son swing high (yapısal direnç)
+        5. Fallback: Minimum R:R
         """
         tp_candidates = []
         structure = analysis["structure"]
 
-        # 1. Sell-side liquidity (equal highs) → ana hedef
+        # 0. HTF (4H) Draw on Liquidity → en güçlü hedef
+        htf_liquidity = analysis.get("htf_liquidity", [])
+        for liq in htf_liquidity:
+            if liq["type"] == "EQUAL_HIGHS" and not liq["swept"]:
+                if liq["price"] > entry:
+                    tp_candidates.append(("HTF_DRAW_ON_LIQ", liq["price"] * 0.999))
+
+        # 1. LTF Sell-side liquidity (equal highs) → ana hedef
         liquidity = analysis.get("liquidity", [])
         for liq in liquidity:
             if liq["type"] == "EQUAL_HIGHS" and not liq["swept"]:
@@ -1382,16 +1437,24 @@ class ICTStrategy:
 
     def _calc_short_tp(self, analysis, df, entry, sl):
         """
-        SHORT TP - ICT yapısal hedefler:
-        1. Karşı taraf likiditesi (equal lows / buy-side liquidity)
-        2. Bullish Order Block seviyesi (karşı OB)
-        3. Son swing low (yapısal destek)
-        4. Fallback: Minimum R:R
+        SHORT TP - ICT Draw on Liquidity (karşı likiditeyi hedefle):
+        1. HTF (4H) karşı likiditesi (en güçlü mıknatıs)
+        2. LTF karşı taraf likiditesi (equal lows)
+        3. Bullish Order Block seviyesi (karşı OB)
+        4. Son swing low (yapısal destek)
+        5. Fallback: Minimum R:R
         """
         tp_candidates = []
         structure = analysis["structure"]
 
-        # 1. Buy-side liquidity (equal lows)
+        # 0. HTF (4H) Draw on Liquidity → en güçlü hedef
+        htf_liquidity = analysis.get("htf_liquidity", [])
+        for liq in htf_liquidity:
+            if liq["type"] == "EQUAL_LOWS" and not liq["swept"]:
+                if liq["price"] < entry:
+                    tp_candidates.append(("HTF_DRAW_ON_LIQ", liq["price"] * 1.001))
+
+        # 1. LTF Buy-side liquidity (equal lows)
         liquidity = analysis.get("liquidity", [])
         for liq in liquidity:
             if liq["type"] == "EQUAL_LOWS" and not liq["swept"]:
