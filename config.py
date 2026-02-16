@@ -50,13 +50,15 @@ ICT_PARAMS = {
     "liquidity_min_touches": 2,          # Minimum dokunma sayısı
     
     # Sinyal Üretimi
-    "min_confluence_score": 65,     # Minimum confluent skor (0-100)
-    "min_confidence": 70,           # Minimum güven skoru (0-100)
+    "min_confluence_score": 70,     # Minimum confluent skor (0-100) - daha seçici
+    "min_confidence": 75,           # Minimum güven skoru (0-100) - daha seçici
     
     # Risk Yönetimi
     "default_sl_pct": 0.015,       # Varsayılan stop loss (%1.5)
     "default_tp_ratio": 2.5,       # TP/SL oranı (Risk-Reward)
     "max_concurrent_trades": 5,    # Maksimum eşzamanlı işlem
+    "min_sl_distance_pct": 0.003,  # Minimum SL mesafesi (%0.3) - çok yakın SL'yi engelle
+    "signal_cooldown_minutes": 15, # Aynı coinde sinyal arası bekleme (dakika)
     
     # Sabırlı Mod
     "patience_watch_candles": 3,    # Sinyal öncesi izlenecek mum sayısı

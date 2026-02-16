@@ -724,11 +724,33 @@ class ICTStrategy:
         if entry is None or sl is None or tp is None:
             return None
 
-        # Risk-Reward kontrolü
-        risk = abs(entry - sl)
-        reward = abs(tp - entry)
+        # ===== YÖN DOĞRULAMASI =====
+        # LONG: SL < Entry < TP olmalı
+        # SHORT: TP < Entry < SL olmalı
+        if direction == "LONG":
+            if sl >= entry or tp <= entry:
+                logger.warning(f"❌ {symbol} LONG seviyeleri ters: Entry={entry} SL={sl} TP={tp}")
+                return None
+            risk = entry - sl
+            reward = tp - entry
+        elif direction == "SHORT":
+            if sl <= entry or tp >= entry:
+                logger.warning(f"❌ {symbol} SHORT seviyeleri ters: Entry={entry} SL={sl} TP={tp}")
+                return None
+            risk = sl - entry
+            reward = entry - tp
+        else:
+            return None
+
         if risk <= 0:
             return None
+
+        # Minimum SL mesafesi kontrolü (%0.3 - çok yakın SL volatilitede vurulur)
+        sl_distance_pct = risk / entry
+        if sl_distance_pct < 0.003:
+            logger.debug(f"  {symbol} SL çok yakın: %{sl_distance_pct*100:.2f} < %0.3")
+            return None
+
         rr_ratio = reward / risk
 
         if rr_ratio < 1.5:

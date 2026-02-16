@@ -11,7 +11,7 @@ from database import (
     get_active_signals, update_signal_status, activate_signal,
     get_active_trade_count, add_signal, add_to_watchlist,
     get_watching_items, update_watchlist_item, promote_watchlist_item,
-    expire_watchlist_item
+    expire_watchlist_item, get_signal_history
 )
 from config import ICT_PARAMS
 
@@ -56,6 +56,23 @@ class TradeManager:
             if s["symbol"] == signal["symbol"] and s["status"] == "ACTIVE":
                 logger.info(f"{signal['symbol']} için zaten aktif işlem var, atlanıyor.")
                 return {"status": "REJECTED", "reason": "Aktif işlem mevcut"}
+
+        # Son 15 dakikada aynı coinde işlem yapılmış mı? (cooldown)
+        from datetime import datetime, timedelta
+        recent_history = get_signal_history(30)
+        cooldown_minutes = 15
+        now = datetime.now()
+        for s in recent_history:
+            if s["symbol"] == signal["symbol"]:
+                created = s.get("created_at", "")
+                if created:
+                    try:
+                        created_dt = datetime.fromisoformat(created)
+                        if (now - created_dt).total_seconds() < cooldown_minutes * 60:
+                            logger.info(f"{signal['symbol']} için {cooldown_minutes}dk cooldown aktif, atlanıyor.")
+                            return {"status": "REJECTED", "reason": f"{cooldown_minutes}dk cooldown"}
+                    except Exception:
+                        pass
 
         # İşleme al
         signal_id = add_signal(
@@ -143,10 +160,24 @@ class TradeManager:
                 "status": "ACTIVE"
             }
 
+            # Seviye doğrulama (ters SL/TP eski sinyalleri temizle)
+            if direction == "LONG" and (stop_loss >= entry_price or take_profit <= entry_price):
+                logger.warning(f"⚠️ #{signal['id']} {symbol} LONG ters seviyeler - iptal ediliyor")
+                update_signal_status(signal["id"], "CANCELLED", close_price=current_price, pnl_pct=0)
+                result["status"] = "CANCELLED"
+                results.append(result)
+                continue
+            elif direction == "SHORT" and (stop_loss <= entry_price or take_profit >= entry_price):
+                logger.warning(f"⚠️ #{signal['id']} {symbol} SHORT ters seviyeler - iptal ediliyor")
+                update_signal_status(signal["id"], "CANCELLED", close_price=current_price, pnl_pct=0)
+                result["status"] = "CANCELLED"
+                results.append(result)
+                continue
+
             if direction == "LONG":
                 # TP kontrolü
                 if current_price >= take_profit:
-                    pnl_pct = ((take_profit - entry_price) / entry_price) * 100
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
                     update_signal_status(signal["id"], "WON", close_price=current_price, pnl_pct=pnl_pct)
                     result["status"] = "WON"
                     result["pnl_pct"] = round(pnl_pct, 2)
@@ -154,7 +185,7 @@ class TradeManager:
 
                 # SL kontrolü
                 elif current_price <= stop_loss:
-                    pnl_pct = ((stop_loss - entry_price) / entry_price) * 100
+                    pnl_pct = ((current_price - entry_price) / entry_price) * 100
                     update_signal_status(signal["id"], "LOST", close_price=current_price, pnl_pct=pnl_pct)
                     result["status"] = "LOST"
                     result["pnl_pct"] = round(pnl_pct, 2)
@@ -168,7 +199,7 @@ class TradeManager:
             elif direction == "SHORT":
                 # TP kontrolü
                 if current_price <= take_profit:
-                    pnl_pct = ((entry_price - take_profit) / entry_price) * 100
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
                     update_signal_status(signal["id"], "WON", close_price=current_price, pnl_pct=pnl_pct)
                     result["status"] = "WON"
                     result["pnl_pct"] = round(pnl_pct, 2)
@@ -176,7 +207,7 @@ class TradeManager:
 
                 # SL kontrolü
                 elif current_price >= stop_loss:
-                    pnl_pct = ((entry_price - stop_loss) / entry_price) * 100
+                    pnl_pct = ((entry_price - current_price) / entry_price) * 100
                     update_signal_status(signal["id"], "LOST", close_price=current_price, pnl_pct=pnl_pct)
                     result["status"] = "LOST"
                     result["pnl_pct"] = round(pnl_pct, 2)
