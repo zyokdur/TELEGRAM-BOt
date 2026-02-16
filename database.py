@@ -61,6 +61,8 @@ def init_db():
             potential_tp REAL,
             watch_reason TEXT,                -- Neden izleniyor
             candles_watched INTEGER DEFAULT 0,
+            confirmation_count INTEGER DEFAULT 0,
+            last_5m_candle_ts TEXT,
             max_watch_candles INTEGER DEFAULT 3,
             initial_score REAL,
             current_score REAL,
@@ -70,6 +72,15 @@ def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Eski veritabanlarında eksik kolonları güvenli şekilde ekle
+    existing_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()
+    }
+    if "confirmation_count" not in existing_cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN confirmation_count INTEGER DEFAULT 0")
+    if "last_5m_candle_ts" not in existing_cols:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN last_5m_candle_ts TEXT")
 
     # Optimizasyon logları
     cursor.execute("""
@@ -202,21 +213,33 @@ def add_to_watchlist(symbol, direction, potential_entry, potential_sl, potential
         return existing["id"]
     cursor.execute("""
         INSERT INTO watchlist (symbol, direction, potential_entry, potential_sl, potential_tp,
-                             watch_reason, initial_score, current_score, components, max_watch_candles)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         watch_reason, candles_watched, confirmation_count, last_5m_candle_ts,
+                         initial_score, current_score, components, max_watch_candles)
+          VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?)
     """, (symbol, direction, potential_entry, potential_sl, potential_tp,
-          watch_reason, initial_score, initial_score, json.dumps(components), max_watch))
+            watch_reason, initial_score, initial_score, json.dumps(components), max_watch))
     conn.commit()
     return cursor.lastrowid
 
 
-def update_watchlist_item(item_id, candles_watched, current_score, status="WATCHING"):
+def update_watchlist_item(item_id, candles_watched, current_score,
+                         confirmation_count=None, last_5m_candle_ts=None, status="WATCHING"):
     conn = get_db()
     now = datetime.now().isoformat()
-    conn.execute("""
-        UPDATE watchlist SET candles_watched=?, current_score=?, status=?, updated_at=?
-        WHERE id=?
-    """, (candles_watched, current_score, status, now, item_id))
+    if confirmation_count is None and last_5m_candle_ts is None:
+        conn.execute("""
+            UPDATE watchlist SET candles_watched=?, current_score=?, status=?, updated_at=?
+            WHERE id=?
+        """, (candles_watched, current_score, status, now, item_id))
+    else:
+        conn.execute("""
+            UPDATE watchlist
+            SET candles_watched=?, current_score=?, confirmation_count=?,
+                last_5m_candle_ts=?, status=?, updated_at=?
+            WHERE id=?
+        """, (candles_watched, current_score,
+              confirmation_count if confirmation_count is not None else 0,
+              last_5m_candle_ts, status, now, item_id))
     conn.commit()
 
 
@@ -362,7 +385,8 @@ def get_component_performance():
     """Her ICT bileşeninin başarı oranını hesapla"""
     conn = get_db()
     rows = conn.execute("""
-        SELECT components, status FROM signals WHERE status IN ('WON', 'LOST') AND components IS NOT NULL
+        SELECT components, status, notes, pnl_pct FROM signals
+        WHERE status IN ('WON', 'LOST') AND components IS NOT NULL
     """).fetchall()
 
     comp_stats = {}
@@ -373,22 +397,108 @@ def get_component_performance():
             continue
         for comp in components:
             if comp not in comp_stats:
-                comp_stats[comp] = {"wins": 0, "losses": 0, "total": 0}
+                comp_stats[comp] = {"wins": 0, "losses": 0, "total": 0, "pnl_sum": 0.0}
             comp_stats[comp]["total"] += 1
+            pnl = row["pnl_pct"] if row["pnl_pct"] else 0
+            comp_stats[comp]["pnl_sum"] += pnl
             if row["status"] == "WON":
                 comp_stats[comp]["wins"] += 1
             else:
                 comp_stats[comp]["losses"] += 1
 
-    # Win rate hesapla
+    # Win rate + ortalama PnL hesapla
     for comp in comp_stats:
         total = comp_stats[comp]["total"]
         if total > 0:
             comp_stats[comp]["win_rate"] = round(comp_stats[comp]["wins"] / total * 100, 1)
+            comp_stats[comp]["avg_pnl"] = round(comp_stats[comp]["pnl_sum"] / total, 3)
         else:
             comp_stats[comp]["win_rate"] = 0
+            comp_stats[comp]["avg_pnl"] = 0
 
     return comp_stats
+
+
+def get_loss_analysis(limit=30):
+    """
+    Kaybeden işlemlerin detaylı analizini çıkar.
+    Bot buradan öğrenecek: neden kaybettik?
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT symbol, direction, components, notes, pnl_pct, confidence,
+               confluence_score, created_at, close_time
+        FROM signals
+        WHERE status = 'LOST'
+        ORDER BY close_time DESC LIMIT ?
+    """, (limit,)).fetchall()
+
+    analysis = {
+        "total_losses": len(rows),
+        "avg_loss_pct": 0,
+        "common_components": {},       # Kayıpta en çok hangi bileşenler vardı
+        "missing_components": {},      # Kayıpta en çok hangi bileşenler EKSİKTİ
+        "low_confidence_losses": 0,    # Düşük güvenle girip kaybeden
+        "lesson_summary": []
+    }
+
+    if not rows:
+        return analysis
+
+    all_possible = [
+        "MARKET_STRUCTURE", "ORDER_BLOCK", "FVG", "DISPLACEMENT",
+        "LIQUIDITY_SWEEP", "OTE", "HTF_CONFIRMATION", "KILLZONE_ACTIVE",
+        "DISCOUNT_ZONE", "PREMIUM_ZONE", "BREAKER_BLOCK"
+    ]
+    total_pnl = 0
+
+    for row in rows:
+        total_pnl += abs(row["pnl_pct"]) if row["pnl_pct"] else 0
+
+        if row["confidence"] and row["confidence"] < 65:
+            analysis["low_confidence_losses"] += 1
+
+        try:
+            comps = json.loads(row["components"]) if row["components"] else []
+        except (json.JSONDecodeError, TypeError):
+            comps = []
+
+        for c in comps:
+            analysis["common_components"][c] = analysis["common_components"].get(c, 0) + 1
+
+        for possible in all_possible:
+            if possible not in comps:
+                analysis["missing_components"][possible] = \
+                    analysis["missing_components"].get(possible, 0) + 1
+
+    analysis["avg_loss_pct"] = round(total_pnl / len(rows), 3) if rows else 0
+
+    # Ders çıkar
+    if analysis["low_confidence_losses"] > len(rows) * 0.4:
+        analysis["lesson_summary"].append(
+            "Kayıpların çoğu düşük güvenle açılmış — min_confidence yükseltilmeli"
+        )
+
+    # En çok eksik olan bileşeni bul
+    if analysis["missing_components"]:
+        worst_missing = max(analysis["missing_components"], key=analysis["missing_components"].get)
+        miss_pct = analysis["missing_components"][worst_missing] / len(rows)
+        if miss_pct > 0.6:
+            analysis["lesson_summary"].append(
+                f"Kayıpların %{miss_pct*100:.0f}'inde {worst_missing} eksikti — bu bileşen zorunlu tutulabilir"
+            )
+
+    # En çok bulunan ama yine kaybeden bileşeni bul
+    if analysis["common_components"]:
+        worst_present = max(analysis["common_components"], key=analysis["common_components"].get)
+        present_pct = analysis["common_components"][worst_present] / len(rows)
+        if present_pct > 0.6:
+            analysis["lesson_summary"].append(
+                f"{worst_present} bileşeni kayıpların %{present_pct*100:.0f}'inde vardı — "
+                f"tek başına güvenilir değil, ek onay gerekli"
+            )
+
+    return analysis
 
 
 # Uygulama başlatıldığında DB'yi initialize et

@@ -13,7 +13,12 @@ from database import (
     get_watching_items, update_watchlist_item, promote_watchlist_item,
     expire_watchlist_item, get_signal_history, get_bot_param
 )
-from config import ICT_PARAMS
+from config import (
+    ICT_PARAMS,
+    WATCH_CONFIRM_TIMEFRAME,
+    WATCH_CONFIRM_CANDLES,
+    WATCH_REQUIRED_CONFIRMATIONS
+)
 
 logger = logging.getLogger("ICT-Bot.TradeManager")
 
@@ -32,17 +37,17 @@ class TradeManager:
     def process_signal(self, signal_result):
         """
         Strateji motorundan gelen sonucu işle
-        - SIGNAL -> İşleme al
-        - WATCH -> İzleme listesine ekle
+        - SIGNAL/WATCH -> Önce izleme listesine al (zorunlu 5m onay akışı)
         """
         if signal_result is None:
             return None
 
         action = signal_result.get("action")
 
-        if action == "SIGNAL":
-            return self._open_trade(signal_result)
-        elif action == "WATCH":
+        if action in ["SIGNAL", "WATCH"]:
+            if action == "SIGNAL":
+                signal_result = dict(signal_result)
+                signal_result["watch_reason"] = "Ön onay bulundu, 5m 3 mum kapanış doğrulaması bekleniyor"
             return self._add_to_watch(signal_result)
 
         return None
@@ -81,6 +86,16 @@ class TradeManager:
                         pass
 
         # İşleme al
+        # Neden girdiğimizi kaydet — optimizer öğrensin
+        entry_reasons = (
+            f"RR: {signal['rr_ratio']} | "
+            f"Score: {signal['confluence_score']} | "
+            f"Conf: {signal['confidence']}% | "
+            f"Session: {signal.get('session', '')} | "
+            f"Bileşenler: {', '.join(signal['components'])} | "
+            f"Cezalar: {', '.join(signal.get('penalties', []))}"
+        )
+
         signal_id = add_signal(
             symbol=signal["symbol"],
             direction=signal["direction"],
@@ -90,9 +105,9 @@ class TradeManager:
             confidence=signal["confidence"],
             confluence_score=signal["confluence_score"],
             components=signal["components"],
-            timeframe="15m",
+            timeframe="5m",
             status="ACTIVE",
-            notes=f"RR: {signal['rr_ratio']} | Bileşenler: {', '.join(signal['components'])}"
+            notes=entry_reasons
         )
 
         activate_signal(signal_id)
@@ -112,7 +127,7 @@ class TradeManager:
 
     def _add_to_watch(self, signal):
         """İzleme listesine ekle"""
-        watch_candles = int(self._param("patience_watch_candles"))
+        watch_candles = WATCH_CONFIRM_CANDLES
         watch_id = add_to_watchlist(
             symbol=signal["symbol"],
             direction=signal["direction"],
@@ -305,34 +320,77 @@ class TradeManager:
     def check_watchlist(self, strategy_engine):
         """
         İzleme listesindeki coinleri kontrol et
-        - Mum sayısı yeterliyse ve skor yükseldiyse sinyal üret
-        - Skor düştüyse veya süre dolduysa listeden çıkar
+        - 5m kapanan mumları tek tek izler
+        - 3 mum içinde yeterli onay toplanırsa işleme alır
+        - Yetersiz onayda expire eder
         """
         watching_items = get_watching_items()
         promoted = []
+        min_confluence = strategy_engine.params["min_confluence_score"]
+        min_confidence = strategy_engine.params["min_confidence"]
 
         for item in watching_items:
             symbol = item["symbol"]
-            candles_watched = item["candles_watched"] + 1
+            candles_watched = int(item.get("candles_watched", 0))
+            confirmation_count = int(item.get("confirmation_count", 0))
             max_watch = item["max_watch_candles"]
+            required_confirmations = min(max_watch, WATCH_REQUIRED_CONFIRMATIONS)
+            expected_direction = item["direction"]
 
-            # Yeni veri çek ve tekrar analiz et (ilk tarama ile aynı şekilde multi-timeframe)
+            # İzleme zaman dilimi (5m) + HTF/MTF verisi çek
+            watch_df = data_fetcher.get_candles(symbol, WATCH_CONFIRM_TIMEFRAME, 120)
             multi_tf = data_fetcher.get_multi_timeframe_data(symbol)
-            df = multi_tf.get("15m") if multi_tf else None
-            if df is None or df.empty:
+            if watch_df is None or watch_df.empty or multi_tf is None:
                 continue
 
-            analysis = strategy_engine.calculate_confluence(df, multi_tf)
-            new_score = analysis["confluence_score"]
-            min_confluence = strategy_engine.params["min_confluence_score"]
-            min_confidence = strategy_engine.params["min_confidence"]
+            # Sadece yeni kapanan 5m mum geldiğinde sayaç artır
+            last_candle_ts = watch_df["timestamp"].iloc[-1].isoformat()
+            if item.get("last_5m_candle_ts") == last_candle_ts:
+                continue
 
+            candles_watched += 1
+
+            analysis = strategy_engine.calculate_confluence(watch_df, multi_tf)
+            new_score = analysis["confluence_score"]
             confidence = strategy_engine._calculate_confidence(analysis)
 
-            if new_score >= min_confluence and confidence >= min_confidence:
-                # Sinyal olgunlaştı mı gerçekten kontrol et (multi-timeframe ile)
-                signal_result = strategy_engine.generate_signal(symbol, df, multi_tf)
-                if signal_result and signal_result["action"] == "SIGNAL":
+            components = analysis.get("components", [])
+            direction_ok = analysis.get("direction") == expected_direction
+            market_ok = not analysis.get("is_ranging", False)
+
+            # ICT kalite bileşenleri — en az 1 tanesi yeterli (ideal filtreleme)
+            ict_quality_hits = sum([
+                "DISPLACEMENT" in components,
+                "ORDER_BLOCK" in components,
+                "FVG" in components,
+                "LIQUIDITY_SWEEP" in components,
+                "OTE" in components,
+                "BREAKER_BLOCK" in components,
+            ])
+            has_ict_quality = ict_quality_hits >= 1
+
+            # Onay kriterleri: yön korunuyor + piyasa aktif + en az 1 ICT bileşeni
+            candle_confirmed = all([
+                direction_ok,
+                market_ok,
+                has_ict_quality,
+                new_score >= (min_confluence * 0.6),   # Sert değil, makul eşik
+            ])
+            if candle_confirmed:
+                confirmation_count += 1
+
+            logger.debug(f"  👁️ {symbol} mum #{candles_watched}: "
+                        f"yön={'✓' if direction_ok else '✗'} "
+                        f"ICT={ict_quality_hits} "
+                        f"skor={new_score:.0f} "
+                        f"onay={confirmation_count}/{candles_watched}")
+
+            # 3 kapanış tamamlandıysa nihai karar ver
+            if candles_watched >= max_watch:
+                signal_result = strategy_engine.generate_signal(symbol, watch_df, multi_tf)
+
+                if confirmation_count >= required_confirmations and \
+                   signal_result and signal_result.get("action") == "SIGNAL":
                     promote_watchlist_item(item["id"])
                     trade_result = self._open_trade(signal_result)
                     promoted.append({
@@ -341,13 +399,12 @@ class TradeManager:
                         "trade_result": trade_result
                     })
                     logger.info(f"⬆️ İZLEMEDEN SİNYALE: {symbol} | "
-                              f"Score: {item['initial_score']} -> {new_score}")
+                              f"Onay: {confirmation_count}/{candles_watched} | Score: {new_score}")
                     continue
 
-            if candles_watched >= max_watch:
-                # Süre doldu ve yeterli skor yok - expire et
                 expire_watchlist_item(item["id"])
-                logger.info(f"⏰ İZLEME SÜRESİ DOLDU: {symbol} | Son Score: {new_score}")
+                logger.info(f"⏰ İZLEME BİTTİ (ONAY YOK): {symbol} | "
+                           f"Onay: {confirmation_count}/{candles_watched} | Son Score: {new_score}")
                 continue
 
             # Score düştüyse expire et
@@ -357,7 +414,14 @@ class TradeManager:
                 continue
 
             # Güncelle ve beklemeye devam
-            update_watchlist_item(item["id"], candles_watched, new_score)
+            update_watchlist_item(
+                item["id"],
+                candles_watched,
+                new_score,
+                confirmation_count=confirmation_count,
+                last_5m_candle_ts=last_candle_ts,
+                status="WATCHING"
+            )
 
         return promoted
 

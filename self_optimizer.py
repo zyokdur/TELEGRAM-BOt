@@ -11,7 +11,7 @@ from datetime import datetime
 from database import (
     get_completed_signals, get_performance_summary,
     get_component_performance, save_bot_param, get_bot_param,
-    add_optimization_log, get_all_bot_params
+    add_optimization_log, get_all_bot_params, get_loss_analysis
 )
 from config import ICT_PARAMS, OPTIMIZER_CONFIG
 
@@ -70,6 +70,10 @@ class SelfOptimizer:
         patience_change = self._optimize_patience(stats)
         if patience_change:
             changes.append(patience_change)
+
+        # 5. Kayıp analizi → derin öğrenme (neden kaybettik?)
+        loss_changes = self._learn_from_losses()
+        changes.extend(loss_changes)
 
         if changes:
             logger.info(f"✅ Optimizasyon tamamlandı: {len(changes)} parametre güncellendi")
@@ -316,6 +320,7 @@ class SelfOptimizer:
         """Optimizasyon özetini döndür"""
         stats = get_performance_summary()
         all_params = get_all_bot_params()
+        loss_info = get_loss_analysis(30)
 
         # Varsayılandan değişen parametreleri bul
         changed_params = {}
@@ -336,8 +341,93 @@ class SelfOptimizer:
             "target_win_rate": self.target_win_rate * 100,
             "changed_params": changed_params,
             "performance": stats,
+            "loss_lessons": loss_info.get("lesson_summary", []),
             "last_check": datetime.now().isoformat()
         }
+
+
+    def _learn_from_losses(self):
+        """
+        Kayıp analizi yaparak otomatik ders çıkar.
+        Neden kaybettik? Hangi bileşen eksikti? Hangi bileşen yanılttı?
+        """
+        changes = []
+        loss_info = get_loss_analysis(30)
+
+        if loss_info["total_losses"] < 5:
+            return changes
+
+        stats = get_performance_summary()
+
+        # 1. Düşük güvenle girilen kayıplar çoğunluksa → min_confidence artır
+        if loss_info["total_losses"] > 0:
+            low_conf_ratio = loss_info["low_confidence_losses"] / loss_info["total_losses"]
+            if low_conf_ratio > 0.4:
+                current = get_bot_param("min_confidence", ICT_PARAMS["min_confidence"])
+                # Küçük adımlarla artır (agresif değil, ideal)
+                new_val = min(85, current + self.learning_rate * 15)
+                new_val = round(new_val, 1)
+                if new_val - current >= 1.0:
+                    save_bot_param("min_confidence", new_val, ICT_PARAMS["min_confidence"])
+                    reason = (f"Kayıpların %{low_conf_ratio*100:.0f}'i düşük güvenli — "
+                             f"eşik {current} → {new_val}")
+                    add_optimization_log("min_confidence", current, new_val, reason,
+                                        stats["win_rate"], stats["win_rate"], stats["total_trades"])
+                    changes.append({"param": "min_confidence", "old": current,
+                                   "new": new_val, "reason": reason})
+                    logger.info(f"🧠 DERS: {reason}")
+
+        # 2. En çok eksik olan bileşeni kontrol et → confluence eşiğini ayarla
+        missing = loss_info.get("missing_components", {})
+        total_losses = loss_info["total_losses"]
+
+        # Displacement kayıplarda çok eksikse → displacement cezasını artır
+        disp_missing = missing.get("DISPLACEMENT", 0)
+        if total_losses > 0 and disp_missing / total_losses > 0.6:
+            current = get_bot_param("displacement_min_body_ratio",
+                                   ICT_PARAMS["displacement_min_body_ratio"])
+            # Displacement parametresini sıkılaştırmak yerine, confluence eşiğini hafif artır
+            current_conf = get_bot_param("min_confluence_score", ICT_PARAMS["min_confluence_score"])
+            new_conf = min(80, current_conf + 1.0)
+            if new_conf > current_conf:
+                save_bot_param("min_confluence_score", new_conf, ICT_PARAMS["min_confluence_score"])
+                reason = (f"Kayıpların %{disp_missing/total_losses*100:.0f}'inde DISPLACEMENT eksik — "
+                         f"confluence {current_conf} → {new_conf}")
+                add_optimization_log("min_confluence_score", current_conf, new_conf, reason,
+                                    stats["win_rate"], stats["win_rate"], stats["total_trades"])
+                changes.append({"param": "min_confluence_score", "old": current_conf,
+                               "new": new_conf, "reason": reason})
+                logger.info(f"🧠 DERS: {reason}")
+
+        # 3. HTF onaysız kayıplar çoksa → HTF uyumsuzluk cezasını artır (dolaylı: eşik)
+        htf_missing = missing.get("HTF_CONFIRMATION", 0)
+        if total_losses > 0 and htf_missing / total_losses > 0.65:
+            reason = (f"Kayıpların %{htf_missing/total_losses*100:.0f}'inde HTF onayı yoktu — "
+                     f"HTF uyumu kritik")
+            logger.info(f"🧠 NOT: {reason}")
+            # Bu bilgiyi lesson olarak sakla, agresif parametre değişikliği yapma
+
+        # 4. Ortalama kayıp büyükse → SL mesafesini kontrol et
+        if loss_info["avg_loss_pct"] > 2.0:
+            current_sl = get_bot_param("default_sl_pct", ICT_PARAMS["default_sl_pct"])
+            # SL çok geniş olabilir, daralt
+            new_sl = max(0.008, current_sl * 0.92)
+            new_sl = round(new_sl, 4)
+            if abs(new_sl - current_sl) > 0.001:
+                save_bot_param("default_sl_pct", new_sl, ICT_PARAMS["default_sl_pct"])
+                reason = (f"Ortalama kayıp %{loss_info['avg_loss_pct']:.1f} çok yüksek — "
+                         f"SL {current_sl} → {new_sl}")
+                add_optimization_log("default_sl_pct", current_sl, new_sl, reason,
+                                    stats["win_rate"], stats["win_rate"], stats["total_trades"])
+                changes.append({"param": "default_sl_pct", "old": current_sl,
+                               "new": new_sl, "reason": reason})
+                logger.info(f"🧠 DERS: {reason}")
+
+        # Ders özetini logla
+        for lesson in loss_info.get("lesson_summary", []):
+            logger.info(f"📝 Optimizer Ders: {lesson}")
+
+        return changes
 
 
 # Global instance

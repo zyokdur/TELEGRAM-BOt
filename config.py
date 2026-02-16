@@ -82,6 +82,11 @@ OPTIMIZER_CONFIG = {
 SCAN_INTERVAL_SECONDS = 60  # Her 60 saniyede bir tarama
 TRADE_CHECK_INTERVAL = 30   # Açık işlem kontrolü (saniye)
 
+# İzleme Onay Akışı (zorunlu)
+WATCH_CONFIRM_TIMEFRAME = "5m"          # İzleme zaman dilimi
+WATCH_CONFIRM_CANDLES = 3               # Kaç mum kapanışı izlenecek
+WATCH_REQUIRED_CONFIRMATIONS = 2        # 3 mum içinde minimum onay adedi
+
 # Web Server
 HOST = "0.0.0.0"
 PORT = 5000
