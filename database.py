@@ -1,143 +1,285 @@
 # =====================================================
 # ICT Trading Bot - Veritabanı İşlemleri
+# SQLite (yerel geliştirme) & PostgreSQL (Render/üretim)
+# =====================================================
+# DATABASE_URL ortam değişkeni ayarlıysa PostgreSQL kullanır,
+# yoksa yerel SQLite dosyasına yazar.
 # =====================================================
 
-import sqlite3
+import os
 import json
 import threading
-from datetime import datetime
-from config import DB_PATH
+from datetime import datetime, date
+
+# =================== BACKEND SEÇİMİ ===================
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_POSTGRES = bool(DATABASE_URL)
+
+if USE_POSTGRES:
+    # Render bazen postgres:// verir, psycopg2 postgresql:// ister
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    import psycopg2
+    import psycopg2.extras
+else:
+    import sqlite3
+    from config import DB_PATH
 
 _local = threading.local()
+
+
+# =================== BAĞLANTI YÖNETİMİ ===================
+
+def _create_connection():
+    """Yeni veritabanı bağlantısı oluştur"""
+    if USE_POSTGRES:
+        kwargs = {}
+        if "sslmode" not in DATABASE_URL:
+            kwargs["sslmode"] = "require"
+        conn = psycopg2.connect(DATABASE_URL, **kwargs)
+        conn.autocommit = True
+        return conn
+    else:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
 
 def get_db():
     """Thread-safe veritabanı bağlantısı"""
     if not hasattr(_local, "conn") or _local.conn is None:
-        _local.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-        _local.conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = _create_connection()
+
+    # PostgreSQL bağlantı canlılık kontrolü
+    if USE_POSTGRES:
+        try:
+            with _local.conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        except Exception:
+            try:
+                _local.conn.close()
+            except Exception:
+                pass
+            _local.conn = _create_connection()
+
     return _local.conn
 
 
+# =================== SORGU YARDIMCILARI ===================
+
+def _q(sql):
+    """SQLite ? → PostgreSQL %s parametre dönüşümü"""
+    if USE_POSTGRES:
+        return sql.replace("?", "%s")
+    return sql
+
+
+def _execute(sql, params=None):
+    """SQL çalıştır ve commit yap"""
+    conn = get_db()
+    if USE_POSTGRES:
+        with conn.cursor() as cur:
+            cur.execute(_q(sql), params or ())
+    else:
+        conn.execute(sql, params or ())
+        conn.commit()
+
+
+def _execute_returning_id(sql, params=None):
+    """INSERT çalıştır, yeni satır ID'sini döndür"""
+    conn = get_db()
+    if USE_POSTGRES:
+        with conn.cursor() as cur:
+            cur.execute(_q(sql) + " RETURNING id", params or ())
+            row = cur.fetchone()
+            return row[0]
+    else:
+        cursor = conn.execute(sql, params or ())
+        conn.commit()
+        return cursor.lastrowid
+
+
+def _fetchall(sql, params=None):
+    """Tüm satırları dict listesi olarak döndür"""
+    conn = get_db()
+    if USE_POSTGRES:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_q(sql), params or ())
+            rows = cur.fetchall()
+            return [_serialize_row(dict(r)) for r in rows]
+    else:
+        rows = conn.execute(sql, params or ()).fetchall()
+        return [dict(row) for row in rows]
+
+
+def _fetchone(sql, params=None):
+    """Tek satır döndür (dict veya None)"""
+    conn = get_db()
+    if USE_POSTGRES:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(_q(sql), params or ())
+            row = cur.fetchone()
+            return _serialize_row(dict(row)) if row else None
+    else:
+        row = conn.execute(sql, params or ()).fetchone()
+        return dict(row) if row else None
+
+
+def _serialize_row(row):
+    """datetime/date nesnelerini ISO string'e çevir (JSON uyumluluğu)"""
+    if row is None:
+        return None
+    for key, val in row.items():
+        if isinstance(val, (datetime, date)):
+            row[key] = val.isoformat()
+    return row
+
+
+def _get_existing_columns(table_name):
+    """Tablodaki mevcut sütun isimlerini getir"""
+    if USE_POSTGRES:
+        rows = _fetchall(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            (table_name,)
+        )
+        return {r["column_name"] for r in rows}
+    else:
+        conn = get_db()
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {row["name"] for row in rows}
+
+
+# =================== SQL TİP UYUMLULUĞU ===================
+
+_AUTO_ID = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+_TS_DEFAULT = "TIMESTAMPTZ DEFAULT NOW()" if USE_POSTGRES else "TEXT DEFAULT CURRENT_TIMESTAMP"
+_FLOAT = "DOUBLE PRECISION" if USE_POSTGRES else "REAL"
+
+
+# =================== TABLO OLUŞTURMA ===================
+
 def init_db():
     """Veritabanı tablolarını oluştur"""
-    conn = get_db()
-    cursor = conn.cursor()
 
     # Sinyaller tablosu
-    cursor.execute("""
+    _execute(f"""
         CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_AUTO_ID},
             symbol TEXT NOT NULL,
-            direction TEXT NOT NULL,           -- 'LONG' veya 'SHORT'
-            entry_price REAL NOT NULL,
-            stop_loss REAL NOT NULL,
-            take_profit REAL NOT NULL,
-            confidence REAL NOT NULL,          -- 0-100 arası güven skoru
-            confluence_score REAL NOT NULL,    -- 0-100 arası confluent skor
-            status TEXT DEFAULT 'WAITING',     -- WAITING, ACTIVE, WON, LOST, CANCELLED, WATCHING
-            components TEXT,                   -- JSON: hangi ICT bileşenleri tetikledi
+            direction TEXT NOT NULL,
+            entry_price {_FLOAT} NOT NULL,
+            stop_loss {_FLOAT} NOT NULL,
+            take_profit {_FLOAT} NOT NULL,
+            confidence {_FLOAT} NOT NULL,
+            confluence_score {_FLOAT} NOT NULL,
+            status TEXT DEFAULT 'WAITING',
+            components TEXT,
             timeframe TEXT,
             entry_time TEXT,
             close_time TEXT,
-            close_price REAL,
-            pnl_pct REAL,                     -- Kar/zarar yüzdesi
+            close_price {_FLOAT},
+            pnl_pct {_FLOAT},
             notes TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            entry_mode TEXT DEFAULT 'MARKET',
+            htf_bias TEXT,
+            rr_ratio {_FLOAT},
+            created_at {_TS_DEFAULT},
+            updated_at {_TS_DEFAULT}
         )
     """)
 
     # İzleme listesi (sabırlı mod)
-    cursor.execute("""
+    _execute(f"""
         CREATE TABLE IF NOT EXISTS watchlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_AUTO_ID},
             symbol TEXT NOT NULL,
             direction TEXT NOT NULL,
-            potential_entry REAL,
-            potential_sl REAL,
-            potential_tp REAL,
-            watch_reason TEXT,                -- Neden izleniyor
+            potential_entry {_FLOAT},
+            potential_sl {_FLOAT},
+            potential_tp {_FLOAT},
+            watch_reason TEXT,
             candles_watched INTEGER DEFAULT 0,
             confirmation_count INTEGER DEFAULT 0,
             last_5m_candle_ts TEXT,
             max_watch_candles INTEGER DEFAULT 3,
-            initial_score REAL,
-            current_score REAL,
-            status TEXT DEFAULT 'WATCHING',   -- WATCHING, PROMOTED, EXPIRED
-            components TEXT,                  -- JSON
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            initial_score {_FLOAT},
+            current_score {_FLOAT},
+            status TEXT DEFAULT 'WATCHING',
+            components TEXT,
+            expire_reason TEXT,
+            created_at {_TS_DEFAULT},
+            updated_at {_TS_DEFAULT}
         )
     """)
 
-    # Eski veritabanlarında eksik kolonları güvenli şekilde ekle
-    existing_cols = {
-        row["name"] for row in conn.execute("PRAGMA table_info(watchlist)").fetchall()
-    }
-    if "confirmation_count" not in existing_cols:
-        conn.execute("ALTER TABLE watchlist ADD COLUMN confirmation_count INTEGER DEFAULT 0")
-    if "last_5m_candle_ts" not in existing_cols:
-        conn.execute("ALTER TABLE watchlist ADD COLUMN last_5m_candle_ts TEXT")
-    if "expire_reason" not in existing_cols:
-        conn.execute("ALTER TABLE watchlist ADD COLUMN expire_reason TEXT")
-
-    # Signals tablosuna yeni kolonlar (v2.0 Smart Money upgrade)
-    signal_cols = {
-        row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
-    }
-    if "entry_mode" not in signal_cols:
-        conn.execute("ALTER TABLE signals ADD COLUMN entry_mode TEXT DEFAULT 'MARKET'")
-    if "htf_bias" not in signal_cols:
-        conn.execute("ALTER TABLE signals ADD COLUMN htf_bias TEXT")
-    if "rr_ratio" not in signal_cols:
-        conn.execute("ALTER TABLE signals ADD COLUMN rr_ratio REAL")
+    # Sütun göçleri (eski veritabanları için)
+    _migrate_columns()
 
     # Optimizasyon logları
-    cursor.execute("""
+    _execute(f"""
         CREATE TABLE IF NOT EXISTS optimization_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_AUTO_ID},
             param_name TEXT NOT NULL,
-            old_value REAL NOT NULL,
-            new_value REAL NOT NULL,
+            old_value {_FLOAT} NOT NULL,
+            new_value {_FLOAT} NOT NULL,
             reason TEXT,
-            win_rate_before REAL,
-            win_rate_after REAL,
+            win_rate_before {_FLOAT},
+            win_rate_after {_FLOAT},
             total_trades_analyzed INTEGER,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at {_TS_DEFAULT}
         )
     """)
 
     # Bot parametreleri (güncel değerler)
-    cursor.execute("""
+    _execute(f"""
         CREATE TABLE IF NOT EXISTS bot_params (
             param_name TEXT PRIMARY KEY,
-            param_value REAL NOT NULL,
-            default_value REAL NOT NULL,
-            last_updated TEXT DEFAULT CURRENT_TIMESTAMP
+            param_value {_FLOAT} NOT NULL,
+            default_value {_FLOAT} NOT NULL,
+            last_updated {_TS_DEFAULT}
         )
     """)
 
     # Performans istatistikleri
-    cursor.execute("""
+    _execute(f"""
         CREATE TABLE IF NOT EXISTS performance_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_AUTO_ID},
             date TEXT NOT NULL,
             total_signals INTEGER DEFAULT 0,
             winning_trades INTEGER DEFAULT 0,
             losing_trades INTEGER DEFAULT 0,
-            total_pnl_pct REAL DEFAULT 0,
-            avg_confidence REAL DEFAULT 0,
-            avg_confluence REAL DEFAULT 0,
-            best_component TEXT,              -- En başarılı ICT bileşeni
-            worst_component TEXT,             -- En kötü ICT bileşeni
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            total_pnl_pct {_FLOAT} DEFAULT 0,
+            avg_confidence {_FLOAT} DEFAULT 0,
+            avg_confluence {_FLOAT} DEFAULT 0,
+            best_component TEXT,
+            worst_component TEXT,
+            created_at {_TS_DEFAULT}
         )
     """)
 
-    conn.commit()
+
+def _migrate_columns():
+    """Eski tablolara eksik sütunları ekle"""
+    # watchlist göçleri
+    watch_cols = _get_existing_columns("watchlist")
+    if "confirmation_count" not in watch_cols:
+        _execute("ALTER TABLE watchlist ADD COLUMN confirmation_count INTEGER DEFAULT 0")
+    if "last_5m_candle_ts" not in watch_cols:
+        _execute("ALTER TABLE watchlist ADD COLUMN last_5m_candle_ts TEXT")
+    if "expire_reason" not in watch_cols:
+        _execute("ALTER TABLE watchlist ADD COLUMN expire_reason TEXT")
+
+    # signals göçleri
+    signal_cols = _get_existing_columns("signals")
+    if "entry_mode" not in signal_cols:
+        _execute("ALTER TABLE signals ADD COLUMN entry_mode TEXT DEFAULT 'MARKET'")
+    if "htf_bias" not in signal_cols:
+        _execute("ALTER TABLE signals ADD COLUMN htf_bias TEXT")
+    if "rr_ratio" not in signal_cols:
+        _execute(f"ALTER TABLE signals ADD COLUMN rr_ratio {_FLOAT}")
 
 
 # =================== SİNYAL İŞLEMLERİ ===================
@@ -146,9 +288,7 @@ def add_signal(symbol, direction, entry_price, stop_loss, take_profit,
                confidence, confluence_score, components, timeframe, status="WAITING",
                notes="", entry_mode="MARKET", htf_bias=None, rr_ratio=None):
     """Yeni sinyal kaydet — tüm ICT meta verileri dahil."""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("""
+    return _execute_returning_id("""
         INSERT INTO signals (symbol, direction, entry_price, stop_loss, take_profit,
                            confidence, confluence_score, components, timeframe, status,
                            notes, entry_mode, htf_bias, rr_ratio)
@@ -156,63 +296,48 @@ def add_signal(symbol, direction, entry_price, stop_loss, take_profit,
     """, (symbol, direction, entry_price, stop_loss, take_profit,
           confidence, confluence_score, json.dumps(components), timeframe, status,
           notes, entry_mode, htf_bias, rr_ratio))
-    conn.commit()
-    return cursor.lastrowid
 
 
 def update_signal_status(signal_id, status, close_price=None, pnl_pct=None):
-    conn = get_db()
     now = datetime.now().isoformat()
     if close_price is not None:
-        conn.execute("""
+        _execute("""
             UPDATE signals SET status=?, close_price=?, pnl_pct=?, close_time=?, updated_at=?
             WHERE id=?
         """, (status, close_price, pnl_pct, now, now, signal_id))
     else:
-        conn.execute("""
+        _execute("""
             UPDATE signals SET status=?, updated_at=? WHERE id=?
         """, (status, now, signal_id))
-    conn.commit()
 
 
 def activate_signal(signal_id):
-    conn = get_db()
     now = datetime.now().isoformat()
-    conn.execute("""
+    _execute("""
         UPDATE signals SET status='ACTIVE', entry_time=?, updated_at=? WHERE id=?
     """, (now, now, signal_id))
-    conn.commit()
 
 
 def get_active_signals():
-    conn = get_db()
-    rows = conn.execute("""
+    return _fetchall("""
         SELECT * FROM signals WHERE status IN ('ACTIVE', 'WAITING') ORDER BY created_at DESC
-    """).fetchall()
-    return [dict(row) for row in rows]
+    """)
 
 
 def get_signal_history(limit=50):
-    conn = get_db()
-    rows = conn.execute("""
+    return _fetchall("""
         SELECT * FROM signals ORDER BY created_at DESC LIMIT ?
-    """, (limit,)).fetchall()
-    return [dict(row) for row in rows]
+    """, (limit,))
 
 
 def get_completed_signals(limit=100):
-    conn = get_db()
-    rows = conn.execute("""
+    return _fetchall("""
         SELECT * FROM signals WHERE status IN ('WON', 'LOST') ORDER BY close_time DESC LIMIT ?
-    """, (limit,)).fetchall()
-    return [dict(row) for row in rows]
+    """, (limit,))
 
 
 def get_active_trade_count():
-    conn = get_db()
-    row = conn.execute("""
-        SELECT COUNT(*) as cnt FROM signals WHERE status = 'ACTIVE'
-    """).fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status = 'ACTIVE'")
     return row["cnt"] if row else 0
 
 
@@ -220,44 +345,49 @@ def get_active_trade_count():
 
 def add_to_watchlist(symbol, direction, potential_entry, potential_sl, potential_tp,
                      watch_reason, initial_score, components, max_watch=3):
-    conn = get_db()
-    cursor = conn.cursor()
     # Aynı sembol ve yönde zaten izleniyor mu?
-    existing = conn.execute("""
+    existing = _fetchone("""
         SELECT id FROM watchlist WHERE symbol=? AND direction=? AND status='WATCHING'
-    """, (symbol, direction)).fetchone()
+    """, (symbol, direction))
     if existing:
         return existing["id"]
+
     # Son 15 dk içinde expire edilmişse tekrar ekleme (cooldown)
-    recent_expired = conn.execute("""
-        SELECT id FROM watchlist
-        WHERE symbol=? AND direction=? AND status='EXPIRED'
-          AND updated_at > datetime('now', '-15 minutes')
-    """, (symbol, direction)).fetchone()
-    if recent_expired:
+    if USE_POSTGRES:
+        recent = _fetchone("""
+            SELECT id FROM watchlist
+            WHERE symbol=? AND direction=? AND status='EXPIRED'
+              AND updated_at > NOW() - INTERVAL '15 minutes'
+        """, (symbol, direction))
+    else:
+        recent = _fetchone("""
+            SELECT id FROM watchlist
+            WHERE symbol=? AND direction=? AND status='EXPIRED'
+              AND updated_at > datetime('now', '-15 minutes')
+        """, (symbol, direction))
+
+    if recent:
         return None
-    cursor.execute("""
+
+    return _execute_returning_id("""
         INSERT INTO watchlist (symbol, direction, potential_entry, potential_sl, potential_tp,
                          watch_reason, candles_watched, confirmation_count, last_5m_candle_ts,
                          initial_score, current_score, components, max_watch_candles)
           VALUES (?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?, ?)
     """, (symbol, direction, potential_entry, potential_sl, potential_tp,
             watch_reason, initial_score, initial_score, json.dumps(components), max_watch))
-    conn.commit()
-    return cursor.lastrowid
 
 
 def update_watchlist_item(item_id, candles_watched, current_score,
                          confirmation_count=None, last_5m_candle_ts=None, status="WATCHING"):
-    conn = get_db()
     now = datetime.now().isoformat()
     if confirmation_count is None and last_5m_candle_ts is None:
-        conn.execute("""
+        _execute("""
             UPDATE watchlist SET candles_watched=?, current_score=?, status=?, updated_at=?
             WHERE id=?
         """, (candles_watched, current_score, status, now, item_id))
     else:
-        conn.execute("""
+        _execute("""
             UPDATE watchlist
             SET candles_watched=?, current_score=?, confirmation_count=?,
                 last_5m_candle_ts=?, status=?, updated_at=?
@@ -265,112 +395,111 @@ def update_watchlist_item(item_id, candles_watched, current_score,
         """, (candles_watched, current_score,
               confirmation_count if confirmation_count is not None else 0,
               last_5m_candle_ts, status, now, item_id))
-    conn.commit()
 
 
 def get_watching_items():
-    conn = get_db()
-    rows = conn.execute("""
+    return _fetchall("""
         SELECT * FROM watchlist WHERE status='WATCHING' ORDER BY current_score DESC
-    """).fetchall()
-    return [dict(row) for row in rows]
+    """)
 
 
 def promote_watchlist_item(item_id):
-    conn = get_db()
     now = datetime.now().isoformat()
-    conn.execute("""
+    _execute("""
         UPDATE watchlist SET status='PROMOTED', updated_at=? WHERE id=?
     """, (now, item_id))
-    conn.commit()
 
 
 def expire_watchlist_item(item_id, reason=None):
-    conn = get_db()
     now = datetime.now().isoformat()
-    conn.execute("""
+    _execute("""
         UPDATE watchlist SET status='EXPIRED', expire_reason=?, updated_at=? WHERE id=?
     """, (reason, now, item_id))
-    conn.commit()
 
 
 def get_recently_expired(minutes=30):
     """Son N dakikada expire edilen watchlist öğeleri"""
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT * FROM watchlist
-        WHERE status='EXPIRED' AND updated_at > datetime('now', ? || ' minutes')
-        ORDER BY updated_at DESC
-        LIMIT 20
-    """, (str(-minutes),)).fetchall()
-    return [dict(row) for row in rows]
+    if USE_POSTGRES:
+        return _fetchall("""
+            SELECT * FROM watchlist
+            WHERE status='EXPIRED'
+              AND updated_at > NOW() + CAST(? || ' minutes' AS INTERVAL)
+            ORDER BY updated_at DESC LIMIT 20
+        """, (str(-minutes),))
+    else:
+        return _fetchall("""
+            SELECT * FROM watchlist
+            WHERE status='EXPIRED'
+              AND updated_at > datetime('now', ? || ' minutes')
+            ORDER BY updated_at DESC LIMIT 20
+        """, (str(-minutes),))
 
 
 # =================== OPTİMİZASYON ===================
 
 def add_optimization_log(param_name, old_value, new_value, reason,
                          win_rate_before, win_rate_after, total_trades):
-    conn = get_db()
-    conn.execute("""
+    _execute("""
         INSERT INTO optimization_logs (param_name, old_value, new_value, reason,
                                       win_rate_before, win_rate_after, total_trades_analyzed)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (param_name, old_value, new_value, reason, win_rate_before, win_rate_after, total_trades))
-    conn.commit()
 
 
 def get_optimization_logs(limit=30):
-    conn = get_db()
-    rows = conn.execute("""
+    return _fetchall("""
         SELECT * FROM optimization_logs ORDER BY created_at DESC LIMIT ?
-    """, (limit,)).fetchall()
-    return [dict(row) for row in rows]
+    """, (limit,))
 
 
 # =================== BOT PARAMETRELERİ ===================
 
 def save_bot_param(param_name, param_value, default_value=None):
-    conn = get_db()
     now = datetime.now().isoformat()
     if default_value is None:
         default_value = param_value
-    conn.execute("""
-        INSERT OR REPLACE INTO bot_params (param_name, param_value, default_value, last_updated)
-        VALUES (?, ?, ?, ?)
-    """, (param_name, param_value, default_value, now))
-    conn.commit()
+    if USE_POSTGRES:
+        _execute("""
+            INSERT INTO bot_params (param_name, param_value, default_value, last_updated)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (param_name) DO UPDATE SET
+                param_value = EXCLUDED.param_value,
+                last_updated = EXCLUDED.last_updated
+        """, (param_name, param_value, default_value, now))
+    else:
+        _execute("""
+            INSERT OR REPLACE INTO bot_params (param_name, param_value, default_value, last_updated)
+            VALUES (?, ?, ?, ?)
+        """, (param_name, param_value, default_value, now))
 
 
 def get_bot_param(param_name, default=None):
-    conn = get_db()
-    row = conn.execute("""
+    row = _fetchone("""
         SELECT param_value FROM bot_params WHERE param_name=?
-    """, (param_name,)).fetchone()
+    """, (param_name,))
     return row["param_value"] if row else default
 
 
 def get_all_bot_params():
-    conn = get_db()
-    rows = conn.execute("SELECT * FROM bot_params").fetchall()
+    rows = _fetchall("SELECT * FROM bot_params")
     return {row["param_name"]: row["param_value"] for row in rows}
 
 
 # =================== İSTATİSTİKLER ===================
 
 def get_performance_summary():
-    conn = get_db()
     stats = {}
 
     # Toplam işlem
-    row = conn.execute("SELECT COUNT(*) as cnt FROM signals WHERE status IN ('WON','LOST')").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status IN ('WON','LOST')")
     stats["total_trades"] = row["cnt"] if row else 0
 
     # Kazananlar
-    row = conn.execute("SELECT COUNT(*) as cnt FROM signals WHERE status='WON'").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status='WON'")
     stats["winning_trades"] = row["cnt"] if row else 0
 
     # Kaybedenler
-    row = conn.execute("SELECT COUNT(*) as cnt FROM signals WHERE status='LOST'").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status='LOST'")
     stats["losing_trades"] = row["cnt"] if row else 0
 
     # Win rate
@@ -380,34 +509,30 @@ def get_performance_summary():
         stats["win_rate"] = 0
 
     # Toplam PnL
-    row = conn.execute("SELECT COALESCE(SUM(pnl_pct), 0) as total FROM signals WHERE status IN ('WON','LOST')").fetchone()
+    row = _fetchone("SELECT COALESCE(SUM(pnl_pct), 0) as total FROM signals WHERE status IN ('WON','LOST')")
     stats["total_pnl"] = round(row["total"], 2) if row else 0
 
     # Ortalama güven skoru
-    row = conn.execute("SELECT AVG(confidence) as avg_conf FROM signals WHERE status IN ('WON','LOST')").fetchone()
+    row = _fetchone("SELECT AVG(confidence) as avg_conf FROM signals WHERE status IN ('WON','LOST')")
     stats["avg_confidence"] = round(row["avg_conf"], 1) if row and row["avg_conf"] else 0
 
     # Aktif sinyaller
-    row = conn.execute("SELECT COUNT(*) as cnt FROM signals WHERE status='ACTIVE'").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status='ACTIVE'")
     stats["active_trades"] = row["cnt"] if row else 0
 
     # Bekleyen sinyaller
-    row = conn.execute("SELECT COUNT(*) as cnt FROM signals WHERE status='WAITING'").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM signals WHERE status='WAITING'")
     stats["waiting_signals"] = row["cnt"] if row else 0
 
     # İzlenen coinler
-    row = conn.execute("SELECT COUNT(*) as cnt FROM watchlist WHERE status='WATCHING'").fetchone()
+    row = _fetchone("SELECT COUNT(*) as cnt FROM watchlist WHERE status='WATCHING'")
     stats["watching_count"] = row["cnt"] if row else 0
 
     # Ortalama RR
-    row = conn.execute("""
-        SELECT AVG(ABS(pnl_pct)) as avg_pnl FROM signals WHERE status='WON'
-    """).fetchone()
+    row = _fetchone("SELECT AVG(ABS(pnl_pct)) as avg_pnl FROM signals WHERE status='WON'")
     avg_win = row["avg_pnl"] if row and row["avg_pnl"] else 0
 
-    row = conn.execute("""
-        SELECT AVG(ABS(pnl_pct)) as avg_pnl FROM signals WHERE status='LOST'
-    """).fetchone()
+    row = _fetchone("SELECT AVG(ABS(pnl_pct)) as avg_pnl FROM signals WHERE status='LOST'")
     avg_loss = row["avg_pnl"] if row and row["avg_pnl"] else 1
 
     stats["avg_rr"] = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0
@@ -420,11 +545,10 @@ def get_performance_summary():
 
 def get_component_performance():
     """Her ICT bileşeninin başarı oranını hesapla"""
-    conn = get_db()
-    rows = conn.execute("""
+    rows = _fetchall("""
         SELECT components, status, notes, pnl_pct FROM signals
         WHERE status IN ('WON', 'LOST') AND components IS NOT NULL
-    """).fetchall()
+    """)
 
     comp_stats = {}
     for row in rows:
@@ -456,16 +580,17 @@ def get_component_performance():
     return comp_stats
 
 
+# =================== ANALİZ FONKSİYONLARI (Optimizer İçin) ===================
+
 def get_confluence_profitability_analysis():
     """
     Confluence Score ile kârlılık arasındaki korelasyonu analiz et.
     Optimizer'ın "Hangi skor aralığı daha kârlı?" sorusuna cevap verir.
     """
-    conn = get_db()
-    rows = conn.execute("""
+    rows = _fetchall("""
         SELECT confluence_score, pnl_pct, status FROM signals
         WHERE status IN ('WON','LOST') AND confluence_score IS NOT NULL
-    """).fetchall()
+    """)
 
     if not rows:
         return {"buckets": {}, "optimal_min_score": None}
@@ -503,13 +628,12 @@ def get_entry_mode_performance():
     LIMIT vs MARKET giriş modlarının performans karşılaştırması.
     Optimizer hangi modun daha kârlı olduğunu öğrenir.
     """
-    conn = get_db()
     result = {}
     for mode in ("LIMIT", "MARKET"):
-        rows = conn.execute("""
+        rows = _fetchall("""
             SELECT status, pnl_pct FROM signals
             WHERE status IN ('WON','LOST') AND entry_mode = ?
-        """, (mode,)).fetchall()
+        """, (mode,))
         if rows:
             wins = sum(1 for r in rows if r['status'] == 'WON')
             total = len(rows)
@@ -526,11 +650,10 @@ def get_htf_bias_accuracy():
     """
     HTF Bias doğruluk analizi — 4H yönü doğru çıkma oranı.
     """
-    conn = get_db()
-    rows = conn.execute("""
+    rows = _fetchall("""
         SELECT htf_bias, status, pnl_pct FROM signals
         WHERE status IN ('WON','LOST') AND htf_bias IS NOT NULL
-    """).fetchall()
+    """)
     result = {}
     for bias in ("BULLISH", "BEARISH", "WEAKENING_BULL", "WEAKENING_BEAR"):
         bias_rows = [r for r in rows if r['htf_bias'] == bias]
@@ -549,21 +672,20 @@ def get_loss_analysis(limit=30):
     Kaybeden işlemlerin detaylı analizini çıkar.
     Bot buradan öğrenecek: neden kaybettik?
     """
-    conn = get_db()
-    rows = conn.execute("""
+    rows = _fetchall("""
         SELECT symbol, direction, components, notes, pnl_pct, confidence,
                confluence_score, created_at, close_time, entry_mode, htf_bias, rr_ratio
         FROM signals
         WHERE status = 'LOST'
         ORDER BY close_time DESC LIMIT ?
-    """, (limit,)).fetchall()
+    """, (limit,))
 
     analysis = {
         "total_losses": len(rows),
         "avg_loss_pct": 0,
-        "common_components": {},       # Kayıpta en çok hangi bileşenler vardı
-        "missing_components": {},      # Kayıpta en çok hangi bileşenler EKSİKTİ
-        "low_confidence_losses": 0,    # Düşük güvenle girip kaybeden
+        "common_components": {},
+        "missing_components": {},
+        "low_confidence_losses": 0,
         "lesson_summary": []
     }
 
@@ -626,5 +748,5 @@ def get_loss_analysis(limit=30):
     return analysis
 
 
-# Uygulama başlatıldığında DB'yi initialize et
+# =================== BAŞLATMA ===================
 init_db()

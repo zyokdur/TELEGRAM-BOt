@@ -198,6 +198,12 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/health")
+def api_health():
+    """Health check — Render uyku engelleme ve durum kontrolü"""
+    return jsonify({"status": "ok", "time": datetime.now().isoformat()})
+
+
 @app.route("/api/status")
 def api_status():
     """Bot durumu"""
@@ -450,6 +456,20 @@ import os
 init_db()
 logger.info("ICT Trading Bot v1.0 - Veritabanı hazır")
 
+# =================== SELF-PING (Render uyku engelleme) ===================
+
+def self_ping():
+    """Render free tier'da uyumayı engelle — her 10 dakikada bir health endpoint'i çağır"""
+    try:
+        render_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if render_url:
+            import requests
+            resp = requests.get(f"{render_url}/api/health", timeout=10)
+            logger.debug(f"Self-ping OK: {resp.status_code}")
+    except Exception as e:
+        logger.debug(f"Self-ping hata (önemsiz): {e}")
+
+
 # Render'da otomatik başlat (gunicorn ile)
 if os.environ.get("RENDER"):
     # Render ortamında botu otomatik başlat
@@ -466,9 +486,12 @@ if os.environ.get("RENDER"):
             scheduler.add_job(run_optimizer, "interval",
                              minutes=OPTIMIZER_CONFIG["optimization_interval_minutes"],
                              id="run_optimizer", replace_existing=True)
+            # Self-ping: her 10 dakikada Render'ı uyanık tut
+            scheduler.add_job(self_ping, "interval", minutes=10,
+                             id="self_ping", replace_existing=True)
             scheduler.start()
             threading.Thread(target=scan_markets, daemon=True).start()
-            logger.info("🚀 Bot Render'da otomatik başlatıldı!")
+            logger.info("🚀 Bot Render'da otomatik başlatıldı! (Self-ping aktif)")
 
     # İlk request'te değil, uygulama başlarken çalıştır
     auto_start_timer = threading.Timer(5.0, auto_start_bot)

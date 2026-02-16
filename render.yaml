@@ -4,8 +4,11 @@ services:
     runtime: python
     buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
     startCommand: "gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app"
+    healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: "3.13.0"
       - key: RENDER
         value: "true"
+      - key: DATABASE_URL
+        sync: false
