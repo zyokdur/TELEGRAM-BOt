@@ -919,52 +919,245 @@ body {
 
 @media (max-width: 768px) {
     .header {
-        padding: 0 12px;
+        padding: 10px 12px;
         height: auto;
         flex-wrap: wrap;
-        padding: 12px;
         gap: 8px;
+    }
+    
+    .header-left {
+        gap: 8px;
+    }
+    
+    .logo {
+        font-size: 15px;
+        gap: 6px;
+    }
+    
+    .logo i {
+        font-size: 18px;
+    }
+    
+    .header-badge {
+        font-size: 9px;
+        padding: 2px 6px;
     }
     
     .header-center { display: none; }
     
-    .main-content {
-        padding: 12px;
-    }
-    
-    .stats-grid {
-        grid-template-columns: repeat(2, 1fr);
+    .header-right {
         gap: 8px;
     }
     
-    .stat-card { padding: 12px; }
-    .stat-value { font-size: 18px; }
+    .server-time { display: none; }
+    
+    .btn {
+        padding: 7px 12px;
+        font-size: 12px;
+        gap: 5px;
+    }
+    
+    .main-content {
+        padding: 10px 8px;
+    }
+    
+    .stats-grid {
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        margin-bottom: 14px;
+    }
+    
+    .stat-card {
+        padding: 10px 8px;
+        border-radius: var(--radius-sm);
+    }
+    
+    .stat-value {
+        font-size: 16px;
+    }
+    
+    .stat-label {
+        font-size: 10px;
+    }
+    
+    .stat-icon {
+        font-size: 14px;
+        width: 28px;
+        height: 28px;
+    }
     
     .tab-nav {
-        flex-wrap: wrap;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        gap: 2px;
+        padding-bottom: 4px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    
+    .tab-nav::-webkit-scrollbar {
+        display: none;
     }
     
     .tab-btn {
-        font-size: 12px;
+        font-size: 11px;
         padding: 8px 10px;
+        white-space: nowrap;
+        flex-shrink: 0;
     }
     
+    .tab-btn i {
+        font-size: 12px;
+    }
+    
+    .section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 10px 12px;
+    }
+    
+    .section-title {
+        font-size: 14px;
+    }
+    
+    /* Tablo mobil kaydırma */
+    .table-container {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin: 0 -8px;
+        padding: 0 8px;
+    }
+    
+    .data-table {
+        min-width: 600px;
+        font-size: 12px;
+    }
+    
+    .data-table th,
+    .data-table td {
+        padding: 8px 6px;
+        font-size: 11px;
+    }
+    
+    /* Coin filtre bar */
+    .coins-filter-bar {
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+    }
+    
+    .coin-search-input {
+        width: 100%;
+    }
+    
+    .section-header-right {
+        width: 100%;
+    }
+    
+    /* Optimizasyon */
     .optimizer-summary {
         grid-template-columns: 1fr;
     }
     
-    .table-container {
-        overflow-x: auto;
+    .params-grid {
+        grid-template-columns: 1fr;
     }
     
-    .data-table {
-        min-width: 700px;
+    .performance-grid {
+        grid-template-columns: 1fr;
     }
     
+    /* Footer */
     .footer {
         flex-direction: column;
         gap: 4px;
         text-align: center;
+        padding: 10px;
+        font-size: 11px;
+    }
+    
+    /* Toast */
+    .toast-container {
+        left: 10px;
+        right: 10px;
+        bottom: 10px;
+    }
+    
+    .toast {
+        min-width: auto;
+        width: 100%;
+        font-size: 12px;
+    }
+}
+
+@media (max-width: 480px) {
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 5px;
+    }
+    
+    .stat-card {
+        padding: 8px 6px;
+    }
+    
+    .stat-value {
+        font-size: 14px;
+    }
+    
+    .stat-label {
+        font-size: 9px;
+    }
+    
+    .stat-icon {
+        display: none;
+    }
+    
+    .header {
+        padding: 8px 10px;
+    }
+    
+    .logo {
+        font-size: 13px;
+    }
+    
+    .btn {
+        padding: 6px 10px;
+        font-size: 11px;
+    }
+    
+    .tab-btn {
+        font-size: 10px;
+        padding: 6px 8px;
+    }
+    
+    .data-table {
+        min-width: 500px;
+        font-size: 11px;
+    }
+    
+    .data-table th,
+    .data-table td {
+        padding: 6px 4px;
+        font-size: 10px;
+    }
+    
+    .badge {
+        font-size: 9px;
+        padding: 2px 5px;
+    }
+    
+    .btn-danger, .btn-analyze {
+        font-size: 10px;
+        padding: 3px 6px;
+    }
+    
+    .main-content {
+        padding: 8px 5px;
+    }
+    
+    .opt-card, .perf-card, .param-card {
+        padding: 10px;
     }
 }
 
