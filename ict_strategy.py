@@ -1,14 +1,33 @@
 # =====================================================
-# ICT Trading Bot - ICT Strateji Motoru
+# ICT Trading Bot - Akıllı Para Strateji Motoru v2.0
+# (Smart Money Concepts - Sequential Gate Protocol)
 # =====================================================
-# Michael J. Huddleston ICT Konseptleri implementasyonu:
-# - Market Structure (BOS / CHoCH)
-# - Order Blocks
-# - Fair Value Gaps (FVG)
-# - Liquidity Sweeps
-# - Premium/Discount Zones
-# - Displacement
-# - Optimal Trade Entry (OTE)
+#
+# PROTOKOL — KATI SIRALI ICT MODELİ:
+# ====================================
+# Adım 1  HTF Bias (4H)          → HARD GATE
+#          4 saatlik grafikteki BOS/CHoCH ile yön belirlenir.
+#          BULLISH yapı → SADECE LONG,  BEARISH yapı → SADECE SHORT.
+#
+# Adım 2  Liquidity Sweep (15m)  → HARD GATE
+#          LTF'de eski bir Swing High/Low seviyesinin
+#          fitille temizlenip (wick beyond) geri kapanmasını bekle.
+#          Bu "stop hunt / likidite avı" paternidir.
+#
+# Adım 3  Displacement + MSS     → HARD GATE
+#          Sweep sonrası ters yöne güçlü hacimli mum (displacement)
+#          ve Market Structure Shift (BOS veya CHoCH) tespit et.
+#
+# Adım 4  FVG Entry Zone         → GİRİŞ BELİRLEME
+#          Displacement mumunun oluşturduğu Fair Value Gap
+#          tespit edilir. Bu FVG "Giriş Bölgesi" olur.
+#          Entry = FVG'nin CE (Consequent Encroachment = orta noktası).
+#
+# SL → Sweep yapısının invalidation noktası (yapısal seviye)
+# TP → Karşı taraf likidite havuzu (Draw on Liquidity)
+#
+# RSI, MACD gibi retail indikatörler KULLANILMAZ.
+# Tüm kararlar Price Action & Market Structure üzerine kuruludur.
 # =====================================================
 
 import numpy as np
@@ -22,13 +41,16 @@ logger = logging.getLogger("ICT-Bot.Strategy")
 
 
 class ICTStrategy:
-    """ICT Strateji Motoru - Tüm ICT konseptlerini analiz eder"""
+    """
+    Akıllı Para (Smart Money) Strateji Motoru.
+    Yukarıda anlatılan 4 adımlı katı sıralı protokolü uygular.
+    """
 
     def __init__(self):
         self.params = self._load_params()
 
     def _load_params(self):
-        """Veritabanından güncel parametreleri yükle, yoksa varsayılanları kullan"""
+        """Veritabanından güncel parametreleri yükle, yoksa config varsayılanı kullan."""
         params = {}
         for key, default_val in ICT_PARAMS.items():
             db_val = get_bot_param(key)
@@ -36,20 +58,22 @@ class ICTStrategy:
         return params
 
     def reload_params(self):
-        """Parametreleri yeniden yükle (optimizer güncellemesi sonrası)"""
+        """Parametreleri yeniden yükle (optimizer güncellemesi sonrası)."""
         self.params = self._load_params()
 
-    # =================== SESSION / KILLZONE ===================
+    # =================================================================
+    #  BÖLÜM 1 — SESSION / KILLZONE
+    # =================================================================
 
     def get_session_info(self):
         """
-        ICT Killzone (oturum) bilgisini hesapla.
-        Kurumsal aktivite belirli saatlerde yoğunlaşır:
-        - Asian Session:  00:00-08:00 UTC (düşük volatilite, likidite oluşumu)
-        - London Killzone: 07:00-10:00 UTC (yüksek volatilite, ana harekeler)
-        - NY Killzone:     12:00-15:00 UTC (yüksek volatilite, trend devamı)
-        - London Close:    15:00-17:00 UTC (geri çekilmeler)
-        - Off-hours:       17:00-00:00 UTC (düşük volatilite)
+        ICT Killzone (oturum) bilgisi.
+        Kurumsal aktivite belirli UTC saatlerinde yoğunlaşır:
+          London Killzone  07-10 UTC  (yüksek volatilite, ana hareketler)
+          NY Killzone      12-15 UTC  (yüksek volatilite, trend devamı)
+          London Close     15-17 UTC  (geri çekilmeler)
+          Asian Session    00-07 UTC  (düşük volatilite, likidite oluşumu)
+          Off-Hours        17-00 UTC  (düşük volatilite)
         """
         now = datetime.now(timezone.utc)
         hour = now.hour
@@ -67,56 +91,51 @@ class ICTStrategy:
         else:
             return {"session": "OFF_HOURS", "quality": 0.3, "label": "Düşük Aktivite"}
 
-    # =================== RANGING MARKET TESPİTİ ===================
+    # =================================================================
+    #  BÖLÜM 2 — YATAY PİYASA TESPİTİ
+    # =================================================================
 
     def detect_ranging_market(self, df, lookback=20):
         """
         Yatay (ranging) piyasayı tespit et.
         Range-bound piyasalarda ICT sinyalleri düşük kalitelidir.
-        ADX benzeri bir volatilite kontrolü uygular.
-        Returns: True = ranging (sinyal üretme), False = trending (sinyal üret)
+        Efficiency ratio + range genişliği kontrolü uygular.
+        Returns: True = ranging → sinyal üretme.
         """
         if len(df) < lookback:
             return False
 
         recent = df.tail(lookback)
+        closes = recent["close"].values
         highs = recent["high"].values
         lows = recent["low"].values
-        closes = recent["close"].values
-
-        # 1. ATR bazlı volatilite (ortalama range vs fiyat)
-        avg_range = np.mean(highs - lows)
         avg_price = np.mean(closes)
-        range_pct = avg_range / avg_price if avg_price > 0 else 0
 
-        # 2. Net hareket / Toplam hareket oranı (efficiency ratio)
+        # Net hareket / toplam hareket (efficiency ratio)
         net_move = abs(closes[-1] - closes[0])
-        total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
+        total_move = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
         efficiency = net_move / total_move if total_move > 0 else 0
 
-        # 3. High-Low range genişliği kontrolü
-        max_high = np.max(highs)
-        min_low = np.min(lows)
-        total_range_pct = (max_high - min_low) / avg_price if avg_price > 0 else 0
+        # Toplam high-low range genişliği
+        total_range_pct = (np.max(highs) - np.min(lows)) / avg_price if avg_price > 0 else 0
 
-        # Ranging koşulları:
-        # - Efficiency çok düşükse (fiyat ileri geri gidip geliyor)
-        # - Toplam range dar ve volatilite düşükse
-        is_ranging = (efficiency < 0.15 and total_range_pct < 0.02) or \
-                     (efficiency < 0.10)
+        is_ranging = (efficiency < 0.15 and total_range_pct < 0.02) or efficiency < 0.10
 
         if is_ranging:
-            logger.debug(f"  📊 Ranging market tespit edildi: eff={efficiency:.3f}, range={total_range_pct:.4f}")
+            logger.debug(f"  📊 Ranging market: eff={efficiency:.3f}, range={total_range_pct:.4f}")
 
         return is_ranging
 
-    # =================== MARKET STRUCTURE ===================
+    # =================================================================
+    #  BÖLÜM 3 — SWING POINTS (Yapı Taşları)
+    # =================================================================
 
     def find_swing_points(self, df, lookback=None):
         """
-        Swing High ve Swing Low noktalarını tespit et
-        Swing High: lookback kadar önceki ve sonraki mumlardan yüksek
-        Swing Low: lookback kadar önceki ve sonraki mumlardan düşük
+        Swing High ve Swing Low noktalarını tespit et.
+        Swing High: lookback kadar sağ ve soldaki mumlardan yüksek olan tepe.
+        Swing Low:  lookback kadar sağ ve soldaki mumlardan düşük olan dip.
+        Bunlar piyasanın iskelet yapısını oluşturur.
         """
         if lookback is None:
             lookback = int(self.params["swing_lookback"])
@@ -124,31 +143,24 @@ class ICTStrategy:
         highs = df["high"].values
         lows = df["low"].values
         n = len(df)
-
         swing_highs = []
         swing_lows = []
 
         for i in range(lookback, n - lookback):
-            # Swing High kontrolü
-            is_swing_high = True
-            for j in range(1, lookback + 1):
-                if highs[i] <= highs[i - j] or highs[i] <= highs[i + j]:
-                    is_swing_high = False
-                    break
-            if is_swing_high:
+            # Swing High: merkez mum sağ ve soldakilerin hepsinden yüksek mi?
+            is_sh = all(highs[i] > highs[i - j] and highs[i] > highs[i + j]
+                        for j in range(1, lookback + 1))
+            if is_sh:
                 swing_highs.append({
                     "index": i,
                     "price": highs[i],
                     "timestamp": df["timestamp"].iloc[i]
                 })
 
-            # Swing Low kontrolü
-            is_swing_low = True
-            for j in range(1, lookback + 1):
-                if lows[i] >= lows[i - j] or lows[i] >= lows[i + j]:
-                    is_swing_low = False
-                    break
-            if is_swing_low:
+            # Swing Low: merkez mum sağ ve soldakilerin hepsinden düşük mü?
+            is_sl = all(lows[i] < lows[i - j] and lows[i] < lows[i + j]
+                        for j in range(1, lookback + 1))
+            if is_sl:
                 swing_lows.append({
                     "index": i,
                     "price": lows[i],
@@ -157,24 +169,24 @@ class ICTStrategy:
 
         return swing_highs, swing_lows
 
+    # =================================================================
+    #  BÖLÜM 4 — MARKET STRUCTURE (BOS / CHoCH)
+    # =================================================================
+
     def detect_market_structure(self, df):
         """
         Piyasa yapısını analiz et:
-        - Trend yönünü belirle
-        - BOS (Break of Structure) tespit et
-        - CHoCH (Change of Character) tespit et
+        - BOS  (Break of Structure):  Mevcut trend yönünde yapı kırılımı.
+        - CHoCH (Change of Character): Trendden ters yöne yapı değişimi.
+        - Trend tespiti: HH+HL = Bullish,  LH+LL = Bearish.
         """
         swing_highs, swing_lows = self.find_swing_points(df)
 
         if len(swing_highs) < 2 or len(swing_lows) < 2:
             return {
-                "trend": "NEUTRAL",
-                "bos_events": [],
-                "choch_events": [],
-                "swing_highs": swing_highs,
-                "swing_lows": swing_lows,
-                "last_swing_high": None,
-                "last_swing_low": None
+                "trend": "NEUTRAL", "bos_events": [], "choch_events": [],
+                "swing_highs": swing_highs, "swing_lows": swing_lows,
+                "last_swing_high": None, "last_swing_low": None
             }
 
         bos_events = []
@@ -182,7 +194,7 @@ class ICTStrategy:
         current_trend = "NEUTRAL"
         min_displacement = self.params["bos_min_displacement"]
 
-        # Son swing noktalarını analiz et
+        # Tüm swing noktalarını index sırasına göre birleştir
         all_swings = []
         for sh in swing_highs:
             all_swings.append({"type": "HIGH", **sh})
@@ -193,71 +205,54 @@ class ICTStrategy:
         # Yapı kırılımlarını tespit et
         for i in range(2, len(all_swings)):
             current = all_swings[i]
-            prev_same = None
-
             # Aynı türden bir önceki swing'i bul
+            prev_same = None
             for j in range(i - 1, -1, -1):
                 if all_swings[j]["type"] == current["type"]:
                     prev_same = all_swings[j]
                     break
-
             if prev_same is None:
                 continue
 
             if current["type"] == "HIGH":
                 if current["price"] > prev_same["price"]:
-                    # Higher High - Yükseliş devamı
-                    if current_trend == "BEARISH":
-                        # CHoCH - Düşüşten yükselişe
-                        displacement = (current["price"] - prev_same["price"]) / prev_same["price"]
-                        if displacement > min_displacement:
+                    displacement = (current["price"] - prev_same["price"]) / prev_same["price"]
+                    if displacement > min_displacement:
+                        if current_trend == "BEARISH":
                             choch_events.append({
-                                "type": "BULLISH_CHOCH",
-                                "index": current["index"],
-                                "price": current["price"],
-                                "prev_price": prev_same["price"],
+                                "type": "BULLISH_CHOCH", "index": current["index"],
+                                "price": current["price"], "prev_price": prev_same["price"],
                                 "timestamp": current["timestamp"]
                             })
-                            current_trend = "BULLISH"
-                    else:
-                        bos_events.append({
-                            "type": "BULLISH_BOS",
-                            "index": current["index"],
-                            "price": current["price"],
-                            "prev_price": prev_same["price"],
-                            "timestamp": current["timestamp"]
-                        })
+                        else:
+                            bos_events.append({
+                                "type": "BULLISH_BOS", "index": current["index"],
+                                "price": current["price"], "prev_price": prev_same["price"],
+                                "timestamp": current["timestamp"]
+                            })
                         current_trend = "BULLISH"
                 else:
-                    # Lower High
                     if current_trend == "BULLISH":
                         current_trend = "WEAKENING_BULL"
 
             elif current["type"] == "LOW":
                 if current["price"] < prev_same["price"]:
-                    # Lower Low - Düşüş devamı
-                    if current_trend == "BULLISH":
-                        displacement = (prev_same["price"] - current["price"]) / prev_same["price"]
-                        if displacement > min_displacement:
+                    displacement = (prev_same["price"] - current["price"]) / prev_same["price"]
+                    if displacement > min_displacement:
+                        if current_trend == "BULLISH":
                             choch_events.append({
-                                "type": "BEARISH_CHOCH",
-                                "index": current["index"],
-                                "price": current["price"],
-                                "prev_price": prev_same["price"],
+                                "type": "BEARISH_CHOCH", "index": current["index"],
+                                "price": current["price"], "prev_price": prev_same["price"],
                                 "timestamp": current["timestamp"]
                             })
-                            current_trend = "BEARISH"
-                    else:
-                        bos_events.append({
-                            "type": "BEARISH_BOS",
-                            "index": current["index"],
-                            "price": current["price"],
-                            "prev_price": prev_same["price"],
-                            "timestamp": current["timestamp"]
-                        })
+                        else:
+                            bos_events.append({
+                                "type": "BEARISH_BOS", "index": current["index"],
+                                "price": current["price"], "prev_price": prev_same["price"],
+                                "timestamp": current["timestamp"]
+                            })
                         current_trend = "BEARISH"
                 else:
-                    # Higher Low
                     if current_trend == "BEARISH":
                         current_trend = "WEAKENING_BEAR"
 
@@ -271,112 +266,88 @@ class ICTStrategy:
             "last_swing_low": swing_lows[-1] if swing_lows else None
         }
 
-    # =================== ORDER BLOCKS ===================
+    # =================================================================
+    #  BÖLÜM 5 — ORDER BLOCKS
+    # =================================================================
 
     def find_order_blocks(self, df, structure):
         """
-        Order Block'ları tespit et:
-        - Bullish OB: BOS öncesi son bearish mum
-        - Bearish OB: BOS öncesi son bullish mum
+        Order Block tespiti:
+        - Bullish OB: BOS/CHoCH öncesi son bearish mum
+          (Kurumlar burada büyük alım yaptı → fiyat geri gelirse destek olur)
+        - Bearish OB: BOS/CHoCH öncesi son bullish mum
+          (Kurumlar burada büyük satış yaptı → fiyat geri gelirse direnç olur)
         """
         order_blocks = []
         max_age = int(self.params["ob_max_age_candles"])
         min_body_ratio = self.params["ob_body_ratio_min"]
         current_idx = len(df) - 1
+        events = structure.get("bos_events", []) + structure.get("choch_events", [])
 
-        bos_events = structure.get("bos_events", []) + structure.get("choch_events", [])
-
-        for event in bos_events:
+        for event in events:
             event_idx = event["index"]
-
-            # Çok eski OB'leri atla
             if current_idx - event_idx > max_age:
                 continue
 
-            if "BULLISH" in event["type"]:
-                # BOS öncesi son bearish mumu bul
-                for j in range(event_idx - 1, max(event_idx - 10, 0), -1):
-                    if j >= len(df):
-                        continue
-                    candle = df.iloc[j]
-                    body = abs(candle["close"] - candle["open"])
-                    total_range = candle["high"] - candle["low"]
+            is_bullish_event = "BULLISH" in event["type"]
 
-                    if total_range <= 0:
-                        continue
+            # Olay öncesi karşı yönlü mumu bul
+            for j in range(event_idx - 1, max(event_idx - 10, 0), -1):
+                if j >= len(df):
+                    continue
+                candle = df.iloc[j]
+                body = abs(candle["close"] - candle["open"])
+                total_range = candle["high"] - candle["low"]
+                if total_range <= 0:
+                    continue
+                body_ratio = body / total_range
 
-                    body_ratio = body / total_range
-
-                    # Bearish mum (close < open) ve yeterli gövde oranı
+                if is_bullish_event:
+                    # Bullish event öncesi bearish mum
                     if candle["close"] < candle["open"] and body_ratio >= min_body_ratio:
                         order_blocks.append({
-                            "type": "BULLISH_OB",
-                            "index": j,
-                            "high": candle["high"],
-                            "low": candle["low"],
-                            "open": candle["open"],
-                            "close": candle["close"],
+                            "type": "BULLISH_OB", "index": j,
+                            "high": candle["high"], "low": candle["low"],
+                            "open": candle["open"], "close": candle["close"],
                             "timestamp": candle["timestamp"],
-                            "mitigated": False,
-                            "strength": body_ratio
+                            "mitigated": False, "strength": body_ratio
                         })
                         break
-
-            elif "BEARISH" in event["type"]:
-                # BOS öncesi son bullish mumu bul
-                for j in range(event_idx - 1, max(event_idx - 10, 0), -1):
-                    if j >= len(df):
-                        continue
-                    candle = df.iloc[j]
-                    body = abs(candle["close"] - candle["open"])
-                    total_range = candle["high"] - candle["low"]
-
-                    if total_range <= 0:
-                        continue
-
-                    body_ratio = body / total_range
-
+                else:
+                    # Bearish event öncesi bullish mum
                     if candle["close"] > candle["open"] and body_ratio >= min_body_ratio:
                         order_blocks.append({
-                            "type": "BEARISH_OB",
-                            "index": j,
-                            "high": candle["high"],
-                            "low": candle["low"],
-                            "open": candle["open"],
-                            "close": candle["close"],
+                            "type": "BEARISH_OB", "index": j,
+                            "high": candle["high"], "low": candle["low"],
+                            "open": candle["open"], "close": candle["close"],
                             "timestamp": candle["timestamp"],
-                            "mitigated": False,
-                            "strength": body_ratio
+                            "mitigated": False, "strength": body_ratio
                         })
                         break
 
-        # Mitigated OB kontrolü (fiyat OB bölgesinden geçmiş mi?)
-        if order_blocks:
-            last_price = df["close"].iloc[-1]
-            for ob in order_blocks:
-                if ob["type"] == "BULLISH_OB":
-                    # Fiyat OB'nin altına düşmüşse mitigate olmuş
-                    after_candles = df.iloc[ob["index"] + 1:]
-                    if len(after_candles) > 0 and after_candles["low"].min() < ob["low"]:
-                        ob["mitigated"] = True
-                elif ob["type"] == "BEARISH_OB":
-                    after_candles = df.iloc[ob["index"] + 1:]
-                    if len(after_candles) > 0 and after_candles["high"].max() > ob["high"]:
-                        ob["mitigated"] = True
+        # Mitigated kontrol — fiyat OB bölgesinden geçtiyse artık geçersiz
+        for ob in order_blocks:
+            after_candles = df.iloc[ob["index"] + 1:]
+            if len(after_candles) == 0:
+                continue
+            if ob["type"] == "BULLISH_OB" and after_candles["low"].min() < ob["low"]:
+                ob["mitigated"] = True
+            elif ob["type"] == "BEARISH_OB" and after_candles["high"].max() > ob["high"]:
+                ob["mitigated"] = True
 
-        # Sadece henüz mitigate olmamış OB'leri döndür
         active_obs = [ob for ob in order_blocks if not ob["mitigated"]]
-        return active_obs, order_blocks  # Hem aktif hem tüm OB'leri döndür
+        return active_obs, order_blocks
 
-    # =================== BREAKER BLOCKS ===================
+    # =================================================================
+    #  BÖLÜM 6 — BREAKER BLOCKS
+    # =================================================================
 
     def find_breaker_blocks(self, all_order_blocks, df):
         """
-        Breaker Block tespiti:
-        Mitigate olmuş bir OB, karşı yönde güçlü bir destek/direnç haline gelir.
-        - Mitigated Bullish OB → Bearish Breaker (direnç)
-        - Mitigated Bearish OB → Bullish Breaker (destek)
-        Bu ICT'de yüksek olasılıklı trade setup'larından biridir.
+        Breaker Block: Mitigate olmuş OB'nin karşı yönde güçlü S/R haline gelmesi.
+        - Kırılmış Bullish OB → Bearish Breaker (direnç)
+        - Kırılmış Bearish OB → Bullish Breaker (destek)
+        ICT'de yüksek olasılıklı setup'lardan biri.
         """
         breaker_blocks = []
         current_price = df["close"].iloc[-1]
@@ -385,45 +356,36 @@ class ICTStrategy:
         for ob in all_order_blocks:
             if not ob["mitigated"]:
                 continue
-
-            # Çok eski breaker'ları atla (max 40 mum)
             if current_idx - ob["index"] > 40:
                 continue
 
             if ob["type"] == "BULLISH_OB":
-                # Mitigated Bullish OB → Bearish Breaker (direnç olarak çalışır)
-                # Fiyat bu bölgeye yaklaşırsa SHORT sinyali güçlenir
                 if current_price >= ob["low"] * 0.998 and current_price <= ob["high"] * 1.005:
                     breaker_blocks.append({
                         "type": "BEARISH_BREAKER",
-                        "high": ob["high"],
-                        "low": ob["low"],
-                        "index": ob["index"],
-                        "timestamp": ob["timestamp"],
-                        "original_ob": "BULLISH_OB"
+                        "high": ob["high"], "low": ob["low"],
+                        "index": ob["index"], "timestamp": ob["timestamp"]
                     })
-
             elif ob["type"] == "BEARISH_OB":
-                # Mitigated Bearish OB → Bullish Breaker (destek olarak çalışır)
                 if current_price >= ob["low"] * 0.995 and current_price <= ob["high"] * 1.002:
                     breaker_blocks.append({
                         "type": "BULLISH_BREAKER",
-                        "high": ob["high"],
-                        "low": ob["low"],
-                        "index": ob["index"],
-                        "timestamp": ob["timestamp"],
-                        "original_ob": "BEARISH_OB"
+                        "high": ob["high"], "low": ob["low"],
+                        "index": ob["index"], "timestamp": ob["timestamp"]
                     })
 
         return breaker_blocks
 
-    # =================== FAIR VALUE GAPS ===================
+    # =================================================================
+    #  BÖLÜM 7 — FAIR VALUE GAPS (FVG)
+    # =================================================================
 
     def find_fvg(self, df):
         """
-        Fair Value Gap (FVG) tespit et:
-        - Bullish FVG: Candle[i-1].high < Candle[i+1].low (boşluk yukarıda)
-        - Bearish FVG: Candle[i-1].low > Candle[i+1].high (boşluk aşağıda)
+        Fair Value Gap tespiti (3 mumlu imbalance paterni):
+        - Bullish FVG: mum[i-1].high < mum[i+1].low → arada boşluk (fiyat geri dönüp doldurmaya çalışır)
+        - Bearish FVG: mum[i-1].low > mum[i+1].high → arada boşluk (fiyat geri çıkıp doldurmaya çalışır)
+        Doldurulmamış FVG'ler güçlü giriş noktalarıdır — kurumsal emir boşluğu.
         """
         fvgs = []
         max_age = int(self.params["fvg_max_age_candles"])
@@ -432,88 +394,67 @@ class ICTStrategy:
         current_idx = n - 1
 
         for i in range(1, n - 1):
-            # Çok eski FVG'leri atla
             if current_idx - i > max_age:
                 continue
 
-            prev_candle = df.iloc[i - 1]
-            curr_candle = df.iloc[i]
-            next_candle = df.iloc[i + 1]
-
-            mid_price = curr_candle["close"]
+            prev_c = df.iloc[i - 1]
+            curr_c = df.iloc[i]
+            next_c = df.iloc[i + 1]
+            mid_price = curr_c["close"]
             if mid_price <= 0:
                 continue
 
             # Bullish FVG
-            if prev_candle["high"] < next_candle["low"]:
-                gap_size = next_candle["low"] - prev_candle["high"]
-                gap_pct = gap_size / mid_price
-
-                if gap_pct >= min_size_pct:
-                    fvg_high = next_candle["low"]
-                    fvg_low = prev_candle["high"]
-
-                    # FVG doldurulmuş mu kontrol et
+            if prev_c["high"] < next_c["low"]:
+                gap = next_c["low"] - prev_c["high"]
+                if gap / mid_price >= min_size_pct:
                     filled = False
                     if i + 2 < n:
-                        after = df.iloc[i + 2:]
-                        if len(after) > 0 and after["low"].min() <= fvg_low:
+                        if df.iloc[i + 2:]["low"].min() <= prev_c["high"]:
                             filled = True
-
                     if not filled:
                         fvgs.append({
-                            "type": "BULLISH_FVG",
-                            "index": i,
-                            "high": fvg_high,
-                            "low": fvg_low,
-                            "size_pct": round(gap_pct * 100, 4),
-                            "timestamp": curr_candle["timestamp"],
-                            "filled": False
+                            "type": "BULLISH_FVG", "index": i,
+                            "high": next_c["low"], "low": prev_c["high"],
+                            "size_pct": round((gap / mid_price) * 100, 4),
+                            "timestamp": curr_c["timestamp"], "filled": False
                         })
 
             # Bearish FVG
-            if prev_candle["low"] > next_candle["high"]:
-                gap_size = prev_candle["low"] - next_candle["high"]
-                gap_pct = gap_size / mid_price
-
-                if gap_pct >= min_size_pct:
-                    fvg_high = prev_candle["low"]
-                    fvg_low = next_candle["high"]
-
+            if prev_c["low"] > next_c["high"]:
+                gap = prev_c["low"] - next_c["high"]
+                if gap / mid_price >= min_size_pct:
                     filled = False
                     if i + 2 < n:
-                        after = df.iloc[i + 2:]
-                        if len(after) > 0 and after["high"].max() >= fvg_high:
+                        if df.iloc[i + 2:]["high"].max() >= prev_c["low"]:
                             filled = True
-
                     if not filled:
                         fvgs.append({
-                            "type": "BEARISH_FVG",
-                            "index": i,
-                            "high": fvg_high,
-                            "low": fvg_low,
-                            "size_pct": round(gap_pct * 100, 4),
-                            "timestamp": curr_candle["timestamp"],
-                            "filled": False
+                            "type": "BEARISH_FVG", "index": i,
+                            "high": prev_c["low"], "low": next_c["high"],
+                            "size_pct": round((gap / mid_price) * 100, 4),
+                            "timestamp": curr_c["timestamp"], "filled": False
                         })
 
         return fvgs
 
-    # =================== LIQUIDITY ===================
+    # =================================================================
+    #  BÖLÜM 8 — LIQUIDITY LEVELS (Equal Highs / Lows)
+    # =================================================================
 
     def find_liquidity_levels(self, df):
         """
         Likidite seviyelerini tespit et:
-        - Equal Highs (eşit tepeler) -> Üstte likidite
-        - Equal Lows (eşit dipler) -> Altta likidite
+        - Equal Highs: Aynı seviyede biriken tepeler → üstte BSL (buy-side liq.)
+        - Equal Lows:  Aynı seviyede biriken dipler  → altta SSL (sell-side liq.)
+        Bu seviyeler, kurumların stopları temizlemek için hedeflediği bölgelerdir.
         """
         tolerance = self.params["liquidity_equal_tolerance"]
         min_touches = int(self.params["liquidity_min_touches"])
         swing_highs, swing_lows = self.find_swing_points(df)
-
         liquidity_levels = []
 
-        # Equal Highs
+        # Equal Highs → BSL (Buy-Side Liquidity)
         for i, sh in enumerate(swing_highs):
             touches = 1
             touched_indices = [sh["index"]]
@@ -521,34 +462,25 @@ class ICTStrategy:
                 if abs(swing_highs[j]["price"] - sh["price"]) / sh["price"] <= tolerance:
                     touches += 1
                     touched_indices.append(swing_highs[j]["index"])
-
             if touches >= min_touches:
-                # Bu seviye zaten listeye eklenmemişse
-                already_exists = False
-                for ll in liquidity_levels:
-                    if ll["type"] == "EQUAL_HIGHS" and abs(ll["price"] - sh["price"]) / sh["price"] <= tolerance:
-                        already_exists = True
-                        break
-
-                if not already_exists:
-                    # Sweep olmuş mu kontrol et
+                exists = any(
+                    ll["type"] == "EQUAL_HIGHS" and
+                    abs(ll["price"] - sh["price"]) / sh["price"] <= tolerance
+                    for ll in liquidity_levels
+                )
+                if not exists:
                     swept = False
                     max_idx = max(touched_indices)
                     if max_idx + 1 < len(df):
-                        after_price = df.iloc[max_idx + 1:]["high"].max()
-                        if after_price > sh["price"] * (1 + tolerance):
+                        if df.iloc[max_idx + 1:]["high"].max() > sh["price"] * (1 + tolerance):
                             swept = True
-
                     liquidity_levels.append({
-                        "type": "EQUAL_HIGHS",
-                        "price": sh["price"],
-                        "touches": touches,
-                        "indices": touched_indices,
-                        "swept": swept,
-                        "side": "SELL"  # Üstte likidite = satıcı likiditesi
+                        "type": "EQUAL_HIGHS", "price": sh["price"],
+                        "touches": touches, "indices": touched_indices,
+                        "swept": swept, "side": "SELL"
                     })
 
-        # Equal Lows
+        # Equal Lows → SSL (Sell-Side Liquidity)
         for i, sl in enumerate(swing_lows):
             touches = 1
             touched_indices = [sl["index"]]
@@ -556,39 +488,35 @@ class ICTStrategy:
                 if abs(swing_lows[j]["price"] - sl["price"]) / sl["price"] <= tolerance:
                     touches += 1
                     touched_indices.append(swing_lows[j]["index"])
-
             if touches >= min_touches:
-                already_exists = False
-                for ll in liquidity_levels:
-                    if ll["type"] == "EQUAL_LOWS" and abs(ll["price"] - sl["price"]) / sl["price"] <= tolerance:
-                        already_exists = True
-                        break
-
-                if not already_exists:
+                exists = any(
+                    ll["type"] == "EQUAL_LOWS" and
+                    abs(ll["price"] - sl["price"]) / sl["price"] <= tolerance
+                    for ll in liquidity_levels
+                )
+                if not exists:
                     swept = False
                     max_idx = max(touched_indices)
                     if max_idx + 1 < len(df):
-                        after_price = df.iloc[max_idx + 1:]["low"].min()
-                        if after_price < sl["price"] * (1 - tolerance):
+                        if df.iloc[max_idx + 1:]["low"].min() < sl["price"] * (1 - tolerance):
                             swept = True
-
                     liquidity_levels.append({
-                        "type": "EQUAL_LOWS",
-                        "price": sl["price"],
-                        "touches": touches,
-                        "indices": touched_indices,
-                        "swept": swept,
-                        "side": "BUY"
+                        "type": "EQUAL_LOWS", "price": sl["price"],
+                        "touches": touches, "indices": touched_indices,
+                        "swept": swept, "side": "BUY"
                     })
 
         return liquidity_levels
 
-    # =================== DISPLACEMENT ===================
+    # =================================================================
+    #  BÖLÜM 9 — DISPLACEMENT (Güçlü Momentum Mumları)
+    # =================================================================
 
     def detect_displacement(self, df, lookback=10):
         """
-        Displacement (güçlü momentum mumları) tespit et
-        Büyük gövdeli, güçlü yönlü mumlar
+        Displacement: Kurumsal aktivitenin izini gösteren güçlü momentum mumları.
+        Büyük gövdeli, küçük fitilli, tek yönlü hareket.
+        ICT'de "displacement" olmadan giriş yapılmaz — kurumsal onay eksik demektir.
         """
         displacements = []
         min_body_ratio = self.params["displacement_min_body_ratio"]
@@ -600,38 +528,36 @@ class ICTStrategy:
             body = abs(candle["close"] - candle["open"])
             total_range = candle["high"] - candle["low"]
             mid_price = (candle["high"] + candle["low"]) / 2
-
             if total_range <= 0 or mid_price <= 0:
                 continue
-
             body_ratio = body / total_range
             size_pct = body / mid_price
 
             if body_ratio >= min_body_ratio and size_pct >= min_size_pct:
                 direction = "BULLISH" if candle["close"] > candle["open"] else "BEARISH"
                 displacements.append({
-                    "type": f"{direction}_DISPLACEMENT",
-                    "index": i,
+                    "type": f"{direction}_DISPLACEMENT", "index": i,
                     "body_ratio": round(body_ratio, 3),
                     "size_pct": round(size_pct * 100, 3),
-                    "direction": direction,
-                    "timestamp": candle["timestamp"]
+                    "direction": direction, "timestamp": candle["timestamp"]
                 })
 
         return displacements
 
-    # =================== PREMIUM / DISCOUNT ===================
+    # =================================================================
+    #  BÖLÜM 10 — PREMIUM / DISCOUNT + OTE
+    # =================================================================
 
     def calculate_premium_discount(self, df, structure):
         """
-        Premium/Discount bölgelerini hesapla
-        Son swing high ve swing low arasındaki 50% seviyesi (equilibrium)
-        Premium: Üst yarı (satış bölgesi)
-        Discount: Alt yarı (alış bölgesi)
+        Premium/Discount bölgeleri:
+        Son swing high-low arasının %50 seviyesi = Equilibrium (denge noktası).
+        Premium (üst yarı) = Satış bölgesi — SHORT için ideal.
+        Discount (alt yarı) = Alış bölgesi — LONG için ideal.
+        OTE (Optimal Trade Entry) = Fibonacci 0.618-0.786 arası → en ideal giriş.
         """
         last_high = structure.get("last_swing_high")
         last_low = structure.get("last_swing_low")
-
         if not last_high or not last_low:
             return None
 
@@ -640,7 +566,6 @@ class ICTStrategy:
         equilibrium = (high_price + low_price) / 2
         current_price = df["close"].iloc[-1]
 
-        # OTE bölgesi (Fibonacci 0.618-0.786)
         fib_range = high_price - low_price
         ote_high = low_price + fib_range * 0.786
         ote_low = low_price + fib_range * 0.618
@@ -648,498 +573,818 @@ class ICTStrategy:
         zone = "PREMIUM" if current_price > equilibrium else "DISCOUNT"
 
         return {
-            "high": high_price,
-            "low": low_price,
-            "equilibrium": equilibrium,
-            "current_price": current_price,
-            "zone": zone,
-            "ote_high": ote_high,
-            "ote_low": ote_low,
+            "high": high_price, "low": low_price,
+            "equilibrium": equilibrium, "current_price": current_price,
+            "zone": zone, "ote_high": ote_high, "ote_low": ote_low,
             "in_ote": ote_low <= current_price <= ote_high,
-            "premium_level": round((current_price - low_price) / (high_price - low_price) * 100, 1)
-                             if high_price != low_price else 50
+            "premium_level": round(
+                (current_price - low_price) / (high_price - low_price) * 100, 1
+            ) if high_price != low_price else 50
         }
 
-    # =================== CONFLUENCE SCORING ===================
+    # =================================================================
+    #  BÖLÜM 11 — GATE 1: HTF BIAS (4 Saatlik Yapı Analizi)
+    # =================================================================
+
+    def _analyze_htf_bias(self, multi_tf_data):
+        """
+        ★ GATE 1 — HTF (4H) yapısından KESTİN yön tespiti.
+
+        4H BOS/CHoCH yukarıysa → SADECE LONG aranır.
+        4H BOS/CHoCH aşağıysa → SADECE SHORT aranır.
+        Belirsizse (NEUTRAL) → İŞLEM YAPILMAZ.
+
+        Bu en kritik filtredir — 4H trendi karşısına işlem açmak
+        bireysel yatırımcıların en büyük hatasıdır.
+
+        Returns: {"bias": "LONG"/"SHORT", "htf_trend": str, "structure": dict}
+                 veya None (belirsiz → işlem yok)
+        """
+        if not multi_tf_data or "4H" not in multi_tf_data:
+            return None
+
+        htf_df = multi_tf_data["4H"]
+        if htf_df is None or htf_df.empty or len(htf_df) < 30:
+            return None
+
+        structure = self.detect_market_structure(htf_df)
+        htf_liquidity = self.find_liquidity_levels(htf_df)
+
+        result_base = {"structure": structure, "liquidity": htf_liquidity}
+
+        if structure["trend"] == "BULLISH":
+            return {**result_base, "bias": "LONG", "htf_trend": "BULLISH", "weak": False}
+        elif structure["trend"] == "BEARISH":
+            return {**result_base, "bias": "SHORT", "htf_trend": "BEARISH", "weak": False}
+        elif structure["trend"] == "WEAKENING_BEAR":
+            # Düşüş zayıflıyor → potansiyel LONG (dikkatli)
+            return {**result_base, "bias": "LONG", "htf_trend": "WEAKENING_BEAR", "weak": True}
+        elif structure["trend"] == "WEAKENING_BULL":
+            # Yükseliş zayıflıyor → potansiyel SHORT (dikkatli)
+            return {**result_base, "bias": "SHORT", "htf_trend": "WEAKENING_BULL", "weak": True}
+
+        return None  # NEUTRAL → NET YÖN YOK → İŞLEM YAPILMAZ
+
+    # =================================================================
+    #  BÖLÜM 12 — GATE 2: LIQUIDITY SWEEP (Likidite Avı)
+    # =================================================================
+
+    def _find_sweep_event(self, df, bias, lookback=30):
+        """
+        ★ GATE 2 — Likidite Avı (Stop Hunt) Tespiti.
+
+        Bu ICT'nin kalbindeki kavramdır: Kurumlar, bireysel yatırımcıların
+        stop-loss emirlerini tetiklemek için fiyatı kasıtlı olarak eski
+        swing noktalarının ötesine iter, sonra asıl yöne döner.
+
+        LONG bias → Fiyat eski bir Swing Low'un ALTINA fitil atar ve
+                     ÜSTÜNDE kapanır (stop hunt → smart money alım)
+        SHORT bias → Fiyat eski bir Swing High'ın ÜSTÜNE fitil atar ve
+                      ALTINDA kapanır (stop hunt → smart money satış)
+
+        Returns: {"swept_level": float, "sweep_candle_idx": int, ...}
+                 veya None (sweep yok)
+        """
+        swing_highs, swing_lows = self.find_swing_points(df)
+        n = len(df)
+
+        if bias == "LONG":
+            # LONG → SSL (Sell-Side Liquidity) avı → eski swing low altına fitil
+            for sw in reversed(swing_lows):
+                sw_price = sw["price"]
+                sw_idx = sw["index"]
+                # Sweep sonraki mumlarda olmalı
+                for i in range(sw_idx + 1, min(sw_idx + lookback + 1, n)):
+                    candle = df.iloc[i]
+                    # Wick sw_price altına inip, close sw_price üstünde mi?
+                    if candle["low"] < sw_price and candle["close"] > sw_price:
+                        # Sweep çok eski olmamalı
+                        if n - 1 - i <= lookback:
+                            return {
+                                "swept_level": sw_price,
+                                "sweep_candle_idx": i,
+                                "sweep_wick": candle["low"],
+                                "sweep_type": "SSL_SWEEP",
+                                "swing_index": sw_idx
+                            }
+
+        elif bias == "SHORT":
+            # SHORT → BSL (Buy-Side Liquidity) avı → eski swing high üstüne fitil
+            for sw in reversed(swing_highs):
+                sw_price = sw["price"]
+                sw_idx = sw["index"]
+                for i in range(sw_idx + 1, min(sw_idx + lookback + 1, n)):
+                    candle = df.iloc[i]
+                    # Wick sw_price üstüne çıkıp, close sw_price altında mı?
+                    if candle["high"] > sw_price and candle["close"] < sw_price:
+                        if n - 1 - i <= lookback:
+                            return {
+                                "swept_level": sw_price,
+                                "sweep_candle_idx": i,
+                                "sweep_wick": candle["high"],
+                                "sweep_type": "BSL_SWEEP",
+                                "swing_index": sw_idx
+                            }
+
+        return None
+
+    # =================================================================
+    #  BÖLÜM 13 — GATE 3: DISPLACEMENT + MSS (Onay)
+    # =================================================================
+
+    def _find_post_sweep_confirmation(self, df, sweep, bias):
+        """
+        ★ GATE 3 — Sweep Sonrası Displacement + Market Structure Shift.
+
+        Sweep tek başına yeterli değil — ardından gerçek dönüş onayı gerekli:
+
+        1. DISPLACEMENT: Sweep'ten sonra bias yönünde güçlü hacimli mum.
+           Bu mum kurumsal aktivitenin "ayak izi"dir.
+
+        2. MSS (Market Structure Shift): Displacement sonrası yapı kırılımı.
+           LONG → Son swing high kırılır (Bullish BOS/CHoCH)
+           SHORT → Son swing low kırılır (Bearish BOS/CHoCH)
+
+        Minimum displacement ZORUNLU. MSS güven bonus'u sağlar.
+
+        Returns: {"displacement": dict, "mss_confirmed": bool}
+                 veya None (onay yok)
+        """
+        sweep_idx = sweep["sweep_candle_idx"]
+        n = len(df)
+        max_lookahead = 15  # Sweep sonrası max 15 mum içinde olmalı
+
+        # --- Displacement Tespiti ---
+        min_body_ratio = self.params.get("displacement_min_body_ratio", 0.7)
+        min_size_pct = self.params.get("displacement_min_size_pct", 0.005)
+        displacement = None
+
+        for i in range(sweep_idx + 1, min(sweep_idx + max_lookahead + 1, n)):
+            candle = df.iloc[i]
+            body = abs(candle["close"] - candle["open"])
+            total_range = candle["high"] - candle["low"]
+            mid_price = (candle["high"] + candle["low"]) / 2
+            if total_range <= 0 or mid_price <= 0:
+                continue
+
+            body_ratio = body / total_range
+            size_pct = body / mid_price
+
+            if body_ratio >= min_body_ratio and size_pct >= min_size_pct:
+                candle_dir = "BULLISH" if candle["close"] > candle["open"] else "BEARISH"
+                # LONG → displacement BULLISH olmalı
+                if bias == "LONG" and candle_dir == "BULLISH":
+                    displacement = {
+                        "index": i, "direction": "BULLISH",
+                        "body_ratio": round(body_ratio, 3),
+                        "size_pct": round(size_pct * 100, 3)
+                    }
+                    break
+                elif bias == "SHORT" and candle_dir == "BEARISH":
+                    displacement = {
+                        "index": i, "direction": "BEARISH",
+                        "body_ratio": round(body_ratio, 3),
+                        "size_pct": round(size_pct * 100, 3)
+                    }
+                    break
+
+        if displacement is None:
+            return None
+
+        # --- MSS (Market Structure Shift) Tespiti ---
+        # Displacement mumunun sweep öncesi yapıyı kırıp kırmadığını kontrol et
+        mss_confirmed = False
+        disp_idx = displacement["index"]
+
+        if bias == "LONG":
+            # Sweep öncesi son swing high bulunmalı ve kırılmalı
+            pre_sweep_highs = [sh for sh in self.find_swing_points(df)[0]
+                               if sh["index"] < sweep_idx]
+            if pre_sweep_highs:
+                target_high = pre_sweep_highs[-1]["price"]
+                for i in range(disp_idx, min(disp_idx + 8, n)):
+                    if df.iloc[i]["high"] > target_high:
+                        mss_confirmed = True
+                        break
+        elif bias == "SHORT":
+            pre_sweep_lows = [sl for sl in self.find_swing_points(df)[1]
+                              if sl["index"] < sweep_idx]
+            if pre_sweep_lows:
+                target_low = pre_sweep_lows[-1]["price"]
+                for i in range(disp_idx, min(disp_idx + 8, n)):
+                    if df.iloc[i]["low"] < target_low:
+                        mss_confirmed = True
+                        break
+
+        return {
+            "displacement": displacement,
+            "mss_confirmed": mss_confirmed,
+            "confidence_boost": 10 if mss_confirmed else 0
+        }
+
+    # =================================================================
+    #  BÖLÜM 14 — GATE 4: DISPLACEMENT FVG (Giriş Bölgesi)
+    # =================================================================
+
+    def _find_displacement_fvg(self, df, displacement_idx, bias):
+        """
+        ★ GATE 4 — Displacement mumunun oluşturduğu FVG'yi bul.
+
+        Displacement mumu tek yönlü güçlü hareket yapar ve MUTLAKA
+        bir FVG (Fair Value Gap) bırakır. Bu FVG kurumsal emir
+        boşluğudur — fiyat buraya geri döner (fill) ve bu bizim
+        GİRİŞ BÖLGEMİZDİR.
+
+        Arama: displacement mumunun kendisi ve çevresindeki 3 mumda FVG ara.
+        Bulamazsa, displacement sonrası oluşan tüm FVG'leri kontrol et.
+
+        Returns: FVG dict veya None
+        """
+        n = len(df)
+        search_start = max(1, displacement_idx - 1)
+        search_end = min(n - 1, displacement_idx + 4)
+        min_fvg_size = self.params.get("fvg_min_size_pct", 0.001)
+        best_fvg = None
+
+        for i in range(search_start, search_end):
+            if i < 1 or i >= n - 1:
+                continue
+            prev = df.iloc[i - 1]
+            curr = df.iloc[i]
+            next_ = df.iloc[i + 1]
+            mid_price = curr["close"]
+            if mid_price <= 0:
+                continue
+
+            if bias == "LONG":
+                # Bullish FVG: prev.high < next.low
+                if prev["high"] < next_["low"]:
+                    gap = next_["low"] - prev["high"]
+                    if gap / mid_price >= min_fvg_size:
+                        filled = False
+                        if i + 2 < n and df.iloc[i + 2:]["low"].min() <= prev["high"]:
+                            filled = True
+                        if not filled:
+                            fvg = {
+                                "type": "BULLISH_FVG", "index": i,
+                                "high": next_["low"], "low": prev["high"],
+                                "size_pct": round((gap / mid_price) * 100, 4),
+                                "timestamp": curr["timestamp"]
+                            }
+                            if best_fvg is None or abs(i - displacement_idx) < abs(best_fvg["index"] - displacement_idx):
+                                best_fvg = fvg
+
+            elif bias == "SHORT":
+                # Bearish FVG: prev.low > next.high
+                if prev["low"] > next_["high"]:
+                    gap = prev["low"] - next_["high"]
+                    if gap / mid_price >= min_fvg_size:
+                        filled = False
+                        if i + 2 < n and df.iloc[i + 2:]["high"].max() >= prev["low"]:
+                            filled = True
+                        if not filled:
+                            fvg = {
+                                "type": "BEARISH_FVG", "index": i,
+                                "high": prev["low"], "low": next_["high"],
+                                "size_pct": round((gap / mid_price) * 100, 4),
+                                "timestamp": curr["timestamp"]
+                            }
+                            if best_fvg is None or abs(i - displacement_idx) < abs(best_fvg["index"] - displacement_idx):
+                                best_fvg = fvg
+
+        # Displacement yakınında FVG bulunamadıysa, displacement sonrası tüm FVG'leri kontrol et
+        if best_fvg is None:
+            all_fvgs = self.find_fvg(df)
+            target_type = "BULLISH_FVG" if bias == "LONG" else "BEARISH_FVG"
+            relevant = [f for f in all_fvgs
+                        if f["type"] == target_type and f["index"] >= displacement_idx - 3]
+            if relevant:
+                best_fvg = min(relevant, key=lambda f: abs(f["index"] - displacement_idx))
+
+        return best_fvg
+
+    # =================================================================
+    #  BÖLÜM 15 — YAPISAL STOP LOSS HESAPLAMA
+    # =================================================================
+
+    def _calc_structural_sl(self, df, sweep, bias, structure):
+        """
+        Yapısal (Structural) Stop Loss hesaplama.
+        SABIT YÜZDE KULLANILMAZ — her zaman piyasa yapısına göre hesaplanır.
+
+        LONG SL sırası:
+          1. Sweep mumunun wick'inin altı (sweep invalidation)
+          2. Sweep edilen swing low'un altı
+          3. Son swing low'un altı
+        SHORT SL sırası:
+          1. Sweep mumunun wick'inin üstü (sweep invalidation)
+          2. Sweep edilen swing high'ın üstü
+          3. Son swing high'ın üstü
+
+        SL mesafesi çok uzaksa → sinyal üretilmez (None döner).
+        """
+        candidates = []
+
+        if bias == "LONG":
+            # 1. Sweep mumunun wick altı (en kesin invalidation noktası)
+            sweep_wick = sweep.get("sweep_wick", sweep.get("sweep_low"))
+            if sweep_wick:
+                candidates.append(("SWEEP_WICK", sweep_wick * 0.998))
+
+            # 2. Sweep edilen seviyenin altı
+            candidates.append(("SWEPT_LEVEL", sweep["swept_level"] * 0.997))
+
+            # 3. Son swing low
+            if structure["last_swing_low"]:
+                candidates.append(("SWING_LOW", structure["last_swing_low"]["price"] * 0.997))
+
+            # En yakın (entry'ye en yakın) geçerli SL'yi seç
+            valid = [(name, price) for name, price in candidates if price > 0]
+            if not valid:
+                return None
+
+            # En yakın olanı seç (unnecessarily geniş SL'den kaçın)
+            best = max(valid, key=lambda x: x[1])
+
+            logger.debug(f"  LONG SL: {best[0]} @ {best[1]:.8f}")
+            return best[1]
+
+        elif bias == "SHORT":
+            sweep_wick = sweep.get("sweep_wick", sweep.get("sweep_high"))
+            if sweep_wick:
+                candidates.append(("SWEEP_WICK", sweep_wick * 1.002))
+
+            candidates.append(("SWEPT_LEVEL", sweep["swept_level"] * 1.003))
+
+            if structure["last_swing_high"]:
+                candidates.append(("SWING_HIGH", structure["last_swing_high"]["price"] * 1.003))
+
+            valid = [(name, price) for name, price in candidates if price > 0]
+            if not valid:
+                return None
+
+            best = min(valid, key=lambda x: x[1])
+
+            logger.debug(f"  SHORT SL: {best[0]} @ {best[1]:.8f}")
+            return best[1]
+
+        return None
+
+    # =================================================================
+    #  BÖLÜM 16 — KARŞI LİKİDİTE TP HESAPLAMA (Draw on Liquidity)
+    # =================================================================
+
+    def _calc_opposing_liquidity_tp(self, df, multi_tf_data, entry, sl, bias, structure):
+        """
+        Draw on Liquidity — Karşı taraftaki likidite havuzunu hedefle.
+        SABİT R:R KULLANILMAZ — her zaman yapısal hedef aranır.
+
+        LONG TP sırası:
+          1. HTF (4H) equal highs → en güçlü mıknatıs
+          2. LTF (15m) equal highs → ana hedef
+          3. Karşı (bearish) Order Block → fiyat burada tepki verir
+          4. Son swing high → yapısal direnç
+          5. Minimum R:R fallback (sadece hiçbir hedef bulunamazsa)
+
+        SHORT TP sırası:
+          1. HTF (4H) equal lows
+          2. LTF (15m) equal lows
+          3. Karşı (bullish) Order Block
+          4. Son swing low
+          5. Minimum R:R fallback
+        """
+        tp_candidates = []
+
+        # HTF likidite
+        htf_liquidity = []
+        if multi_tf_data and "4H" in multi_tf_data and not multi_tf_data["4H"].empty:
+            htf_liquidity = self.find_liquidity_levels(multi_tf_data["4H"])
+
+        # LTF likidite
+        ltf_liquidity = self.find_liquidity_levels(df)
+
+        # LTF yapı ve order blocks
+        ltf_structure = self.detect_market_structure(df)
+        active_obs, _ = self.find_order_blocks(df, ltf_structure)
+
+        if bias == "LONG":
+            risk = entry - sl if sl and sl < entry else entry * 0.015
+
+            # HTF Draw on Liquidity
+            for liq in htf_liquidity:
+                if liq["type"] == "EQUAL_HIGHS" and not liq["swept"] and liq["price"] > entry:
+                    tp_candidates.append(("HTF_DRAW_LIQ", liq["price"] * 0.999))
+
+            # LTF BSL (equal highs)
+            for liq in ltf_liquidity:
+                if liq["type"] == "EQUAL_HIGHS" and not liq["swept"] and liq["price"] > entry:
+                    tp_candidates.append(("LTF_BSL", liq["price"] * 0.999))
+
+            # Karşı OB
+            for ob in active_obs:
+                if ob["type"] == "BEARISH_OB" and ob["low"] > entry:
+                    tp_candidates.append(("OPPOSING_OB", ob["low"]))
+
+            # Son swing high
+            if structure["last_swing_high"] and structure["last_swing_high"]["price"] > entry:
+                tp_candidates.append(("SWING_HIGH", structure["last_swing_high"]["price"] * 0.998))
+
+            # Önceki swing high'lar
+            for sh in structure.get("swing_highs", []):
+                if sh["price"] > entry * 1.005:
+                    tp_candidates.append(("PREV_SH", sh["price"] * 0.998))
+
+        elif bias == "SHORT":
+            risk = sl - entry if sl and sl > entry else entry * 0.015
+
+            for liq in htf_liquidity:
+                if liq["type"] == "EQUAL_LOWS" and not liq["swept"] and liq["price"] < entry:
+                    tp_candidates.append(("HTF_DRAW_LIQ", liq["price"] * 1.001))
+
+            for liq in ltf_liquidity:
+                if liq["type"] == "EQUAL_LOWS" and not liq["swept"] and liq["price"] < entry:
+                    tp_candidates.append(("LTF_SSL", liq["price"] * 1.001))
+
+            for ob in active_obs:
+                if ob["type"] == "BULLISH_OB" and ob["high"] < entry:
+                    tp_candidates.append(("OPPOSING_OB", ob["high"]))
+
+            if structure["last_swing_low"] and structure["last_swing_low"]["price"] < entry:
+                tp_candidates.append(("SWING_LOW", structure["last_swing_low"]["price"] * 1.002))
+
+            for sl_p in structure.get("swing_lows", []):
+                if sl_p["price"] < entry * 0.995:
+                    tp_candidates.append(("PREV_SL", sl_p["price"] * 1.002))
+
+        if not tp_candidates:
+            # Son çare: minimum R:R ile hesapla — ama bu ideal DEĞİL
+            min_rr = self.params.get("default_tp_ratio", 2.5)
+            if bias == "LONG":
+                return entry + (risk * min_rr)
+            else:
+                return entry - (risk * min_rr)
+
+        # Minimum 1.5 R:R sağlayan en yakın yapısal hedefi seç
+        min_reward = risk * 1.5
+
+        if bias == "LONG":
+            valid = [(n, p) for n, p in tp_candidates if (p - entry) >= min_reward]
+            if valid:
+                best = min(valid, key=lambda x: x[1])  # En yakın geçerli hedef
+                logger.debug(f"  LONG TP: {best[0]} @ {best[1]:.8f}")
+                return best[1]
+            # 1.5 RR sağlayan hedef yoksa en uzak olanı dene
+            if tp_candidates:
+                best = max(tp_candidates, key=lambda x: x[1])
+                if (best[1] - entry) > risk:
+                    return best[1]
+        else:
+            valid = [(n, p) for n, p in tp_candidates if (entry - p) >= min_reward]
+            if valid:
+                best = max(valid, key=lambda x: x[1])  # En yakın geçerli hedef (SHORT için en yüksek)
+                logger.debug(f"  SHORT TP: {best[0]} @ {best[1]:.8f}")
+                return best[1]
+            if tp_candidates:
+                best = min(tp_candidates, key=lambda x: x[1])
+                if (entry - best[1]) > risk:
+                    return best[1]
+
+        # Gerçekten hiçbir hedef yoksa minimum R:R
+        min_rr = self.params.get("default_tp_ratio", 2.5)
+        if bias == "LONG":
+            return entry + (risk * min_rr)
+        return entry - (risk * min_rr)
+
+    # =================================================================
+    #  BÖLÜM 17 — CONFLUENCE SCORING (Geriye Uyumlu)
+    # =================================================================
 
     def calculate_confluence(self, df, multi_tf_data=None):
         """
-        Tüm ICT konseptlerini analiz edip confluent skor hesapla.
-        
-        İYİLEŞTİRMELER:
-        - Session/Killzone ağırlığı
-        - Breaker Block tespiti
-        - Recency weighting (yeni OB/FVG daha değerli)
-        - Displacement zorunluluğu güçlendirildi
-        - Ranging market cezası
-        - HTF + MTF çift onay
-        - WEAKENING trend cezası
+        Tüm ICT bileşenlerini analiz edip confluent skor hesapla.
+
+        Bu metod hem generate_signal() tarafından hem de
+        izleme listesi onayı (check_watchlist) ve API tarafından kullanılır.
+
+        Sıralı Ağırlıklandırma:
+          HTF Bias uyumu:       25 puan (veya -15 ceza)
+          Liquidity Sweep:      20 puan
+          Displacement:         15 puan (yoksa -8 ceza)
+          FVG giriş bölgesi:    15 puan
+          Market Structure:     10 puan
+          Premium/Discount:     10 puan
+          Session (Killzone):    5 puan
+          Order Block:           5 bonus
+          Breaker Block:         5 bonus
+          Sweep+MSS (A+):      10 bonus
         """
         analysis = {}
-        components_triggered = []
+        components = []
         score = 0
-        max_score = 0
         penalties = []
 
         current_price = df["close"].iloc[-1]
         current_idx = len(df) - 1
+        analysis["current_price"] = current_price
 
-        # ===== RANGING MARKET KONTROLÜ =====
+        # === RANGING MARKET ===
         is_ranging = self.detect_ranging_market(df)
         analysis["is_ranging"] = is_ranging
 
-        # ===== SESSION / KILLZONE =====
+        # === SESSION / KILLZONE ===
         session_info = self.get_session_info()
         analysis["session"] = session_info
 
-        # 1. Market Structure Analizi (25 puan)
+        # === LTF MARKET STRUCTURE (15m) ===
         structure = self.detect_market_structure(df)
         analysis["structure"] = structure
-        weight_structure = 25
-        max_score += weight_structure
 
         if structure["trend"] in ["BULLISH", "BEARISH"]:
-            score += weight_structure
-            components_triggered.append("MARKET_STRUCTURE")
+            score += 10
+            components.append("MARKET_STRUCTURE")
         elif structure["trend"] in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
-            # WEAKENING trendler daha düşük puan (tam onay yok)
-            score += weight_structure * 0.3
+            score += 3
             penalties.append("WEAKENING_TREND(-7)")
 
-        # 2. Order Blocks (20 puan) + Recency Weighting
-        active_obs, all_obs_raw = self.find_order_blocks(df, structure)
-        analysis["order_blocks"] = active_obs
-        analysis["all_order_blocks"] = all_obs_raw
-        weight_ob = 20
-        max_score += weight_ob
+        # === HTF BIAS (4H) ===
+        htf_bias_block = False
+        htf_result = self._analyze_htf_bias(multi_tf_data)
+        analysis["htf_result"] = htf_result
 
-        relevant_obs = []
-        for ob in active_obs:
-            # Recency weighting: Son 10 mumda oluşan OB'ler daha değerli
-            recency_factor = 1.0
-            age = current_idx - ob["index"]
-            if age <= 5:
-                recency_factor = 1.0
-            elif age <= 15:
-                recency_factor = 0.8
-            elif age <= 25:
-                recency_factor = 0.6
+        if htf_result:
+            analysis["htf_trend"] = htf_result["htf_trend"]
+            analysis["htf_structure"] = htf_result["structure"]
+            analysis["htf_liquidity"] = htf_result.get("liquidity", [])
+
+            # HTF ve LTF aynı yönde mi?
+            if htf_result["bias"] == "LONG" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
+                score += 25
+                components.append("HTF_CONFIRMATION")
+            elif htf_result["bias"] == "SHORT" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
+                score += 25
+                components.append("HTF_CONFIRMATION")
+            elif htf_result["bias"] == "LONG" and structure["trend"] == "BEARISH":
+                # HTF LONG ama LTF BEARISH → HARD BLOCK
+                htf_bias_block = True
+                score -= 15
+                penalties.append("HTF_BIAS_BLOCK(-15)")
+            elif htf_result["bias"] == "SHORT" and structure["trend"] == "BULLISH":
+                htf_bias_block = True
+                score -= 15
+                penalties.append("HTF_BIAS_BLOCK(-15)")
             else:
-                recency_factor = 0.4
-
-            if ob["type"] == "BULLISH_OB" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                if ob["low"] <= current_price <= ob["high"] * 1.005:
-                    relevant_obs.append(ob)
-                    score += weight_ob * recency_factor
-                    components_triggered.append("ORDER_BLOCK")
-                    break
-                elif current_price < ob["high"] * 1.02 and current_price > ob["low"] * 0.99:
-                    score += weight_ob * 0.4 * recency_factor
-            elif ob["type"] == "BEARISH_OB" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                if ob["low"] <= current_price <= ob["high"] * 1.005:
-                    relevant_obs.append(ob)
-                    score += weight_ob * recency_factor
-                    components_triggered.append("ORDER_BLOCK")
-                    break
-                elif current_price > ob["low"] * 0.98 and current_price < ob["high"] * 1.01:
-                    score += weight_ob * 0.4 * recency_factor
-
-        analysis["relevant_obs"] = relevant_obs
-
-        # 2b. Breaker Blocks (7 bonus puan)
-        breaker_blocks = self.find_breaker_blocks(all_obs_raw, df)
-        analysis["breaker_blocks"] = breaker_blocks
-
-        for bb in breaker_blocks:
-            if bb["type"] == "BULLISH_BREAKER" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                score += 7
-                components_triggered.append("BREAKER_BLOCK")
-                break
-            elif bb["type"] == "BEARISH_BREAKER" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                score += 7
-                components_triggered.append("BREAKER_BLOCK")
-                break
-
-        # 3. Fair Value Gaps (15 puan) + Recency Weighting
-        fvgs = self.find_fvg(df)
-        analysis["fvgs"] = fvgs
-        weight_fvg = 15
-        max_score += weight_fvg
-
-        relevant_fvgs = []
-        for fvg in fvgs:
-            # Recency weighting
-            fvg_age = current_idx - fvg["index"]
-            fvg_recency = 1.0 if fvg_age <= 8 else (0.7 if fvg_age <= 15 else 0.4)
-
-            if fvg["type"] == "BULLISH_FVG" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
-                    relevant_fvgs.append(fvg)
-                    score += weight_fvg * fvg_recency
-                    components_triggered.append("FVG")
-                    break
-            elif fvg["type"] == "BEARISH_FVG" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
-                    relevant_fvgs.append(fvg)
-                    score += weight_fvg * fvg_recency
-                    components_triggered.append("FVG")
-                    break
-
-        analysis["relevant_fvgs"] = relevant_fvgs
-
-        # 4. Liquidity + Sweep-MSS A+ Setup (15 puan)
-        liquidity = self.find_liquidity_levels(df)
-        analysis["liquidity"] = liquidity
-        weight_liq = 15
-        max_score += weight_liq
-
-        sweep_mss_detected = False
-        for liq in liquidity:
-            if liq["swept"]:
-                if liq["type"] == "EQUAL_LOWS" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                    score += weight_liq
-                    components_triggered.append("LIQUIDITY_SWEEP")
-
-                    # A+ Setup: Sweep sonrası MSS (BOS/CHoCH) var mı?
-                    sweep_idx = max(liq["indices"])
-                    for bos in structure.get("bos_events", []) + structure.get("choch_events", []):
-                        if bos["index"] > sweep_idx and "BULLISH" in bos["type"]:
-                            sweep_mss_detected = True
-                            break
-                    break
-
-                elif liq["type"] == "EQUAL_HIGHS" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                    score += weight_liq
-                    components_triggered.append("LIQUIDITY_SWEEP")
-
-                    sweep_idx = max(liq["indices"])
-                    for bos in structure.get("bos_events", []) + structure.get("choch_events", []):
-                        if bos["index"] > sweep_idx and "BEARISH" in bos["type"]:
-                            sweep_mss_detected = True
-                            break
-                    break
-
-        # Sweep + MSS = A+ Setup → ekstra 10 bonus
-        if sweep_mss_detected:
-            score += 10
-            components_triggered.append("SWEEP_MSS_A_PLUS")
-            logger.debug(f"  🅰️ A+ SETUP: Likidite sweep + MSS tespit edildi")
-        analysis["sweep_mss"] = sweep_mss_detected
-
-        # 5. Displacement (15 puan → önem artırıldı, ICT'de kritik onay)
-        displacements = self.detect_displacement(df)
-        analysis["displacements"] = displacements
-        weight_disp = 15  # 10'dan 15'e çıkarıldı
-        max_score += weight_disp
-
-        has_displacement = False
-        if displacements:
-            last_disp = displacements[-1]
-            if last_disp["direction"] == "BULLISH" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                score += weight_disp
-                components_triggered.append("DISPLACEMENT")
-                has_displacement = True
-            elif last_disp["direction"] == "BEARISH" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                score += weight_disp
-                components_triggered.append("DISPLACEMENT")
-                has_displacement = True
-
-        # Displacement yoksa ceza (kurumsal aktivite onayı eksik)
-        if not has_displacement:
-            penalties.append("NO_DISPLACEMENT(-8)")
-            score -= 8
-
-        # 6. Premium/Discount (15 puan)
-        pd_zone = self.calculate_premium_discount(df, structure)
-        analysis["premium_discount"] = pd_zone
-        weight_pd = 15
-        max_score += weight_pd
-
-        if pd_zone:
-            if pd_zone["zone"] == "DISCOUNT" and structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-                score += weight_pd * 0.7
-                if pd_zone["in_ote"]:
-                    score += weight_pd * 0.3
-                    components_triggered.append("OTE")
-                components_triggered.append("DISCOUNT_ZONE")
-            elif pd_zone["zone"] == "PREMIUM" and structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-                score += weight_pd * 0.7
-                if pd_zone["in_ote"]:
-                    score += weight_pd * 0.3
-                    components_triggered.append("OTE")
-                components_triggered.append("PREMIUM_ZONE")
-
-        # ===== HTF BIAS HARD FİLTRE + MTF ONAY =====
-        htf_aligned = False
-        mtf_aligned = False
-        htf_bias_block = False   # HTF karşı yöndeyse sinyali tamamen engelle
-
-        if multi_tf_data:
-            # 4H (HTF) — "Bias" belirler, LTF buna uymalı
-            if "4H" in multi_tf_data and not multi_tf_data["4H"].empty:
-                htf_structure = self.detect_market_structure(multi_tf_data["4H"])
-                htf_liquidity = self.find_liquidity_levels(multi_tf_data["4H"])
-                analysis["htf_trend"] = htf_structure["trend"]
-                analysis["htf_structure"] = htf_structure
-                analysis["htf_liquidity"] = htf_liquidity
-
-                if htf_structure["trend"] == structure["trend"]:
-                    htf_aligned = True
-                    score += 5
-                    components_triggered.append("HTF_CONFIRMATION")
-                elif htf_structure["trend"] in ["BULLISH", "BEARISH"] and \
-                     structure["trend"] in ["BULLISH", "BEARISH"] and \
-                     htf_structure["trend"] != structure["trend"]:
-                    # 4H BEARISH iken LTF LONG → HARD BLOCK
-                    # 4H BULLISH iken LTF SHORT → HARD BLOCK
-                    htf_bias_block = True
-                    score -= 15
-                    penalties.append("HTF_BIAS_BLOCK(-15)")
-                    logger.debug(f"  ⛔ HTF Bias Block: 4H={htf_structure['trend']} vs LTF={structure['trend']}")
-
-            # 1H (MTF) onayı → +3 bonus
-            if "1H" in multi_tf_data and not multi_tf_data["1H"].empty:
-                mtf_structure = self.detect_market_structure(multi_tf_data["1H"])
-                analysis["mtf_trend"] = mtf_structure["trend"]
-                if mtf_structure["trend"] == structure["trend"]:
-                    mtf_aligned = True
-                    score += 3
-                    components_triggered.append("MTF_CONFIRMATION")
+                # HTF var ama kısmi uyum
+                score += 10
+        else:
+            analysis["htf_trend"] = "UNKNOWN"
+            analysis["htf_structure"] = None
+            analysis["htf_liquidity"] = []
 
         analysis["htf_bias_block"] = htf_bias_block
 
-        # Triple timeframe alignment bonus
-        if htf_aligned and mtf_aligned:
-            score += 3
-            components_triggered.append("TRIPLE_TF_ALIGNMENT")
+        # === MTF (1H) ONAY ===
+        if multi_tf_data and "1H" in multi_tf_data and not multi_tf_data["1H"].empty:
+            mtf_struct = self.detect_market_structure(multi_tf_data["1H"])
+            analysis["mtf_trend"] = mtf_struct["trend"]
+            if mtf_struct["trend"] == structure["trend"]:
+                score += 3
+                components.append("MTF_CONFIRMATION")
+        else:
+            analysis["mtf_trend"] = "UNKNOWN"
 
-        # ===== SESSION QUALITY BONUSU =====
-        session_quality = session_info["quality"]
-        if session_quality >= 0.8:
-            score += 5
-            components_triggered.append("KILLZONE_ACTIVE")
-        elif session_quality <= 0.3:
-            penalties.append("OFF_HOURS(-5)")
-            score -= 5
-
-        # ===== RANGING MARKET CEZASI =====
-        if is_ranging:
-            score -= 15
-            penalties.append("RANGING_MARKET(-15)")
-
-        # Normalize et (0-100), minimum 0
-        score = max(0, score)
-        confluence_score = min(100, round((score / max_score) * 100, 1)) if max_score > 0 else 0
-
-        # Yön belirle
+        # === YÖN === 
         direction = None
         if structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
             direction = "LONG"
         elif structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
             direction = "SHORT"
+        analysis["direction"] = direction
+
+        # === LIQUIDITY SWEEP ===
+        bias_for_sweep = direction or (htf_result["bias"] if htf_result else None)
+        sweep_detected = False
+        sweep_mss_detected = False
+
+        if bias_for_sweep:
+            sweep = self._find_sweep_event(df, bias_for_sweep)
+            analysis["sweep"] = sweep
+            if sweep:
+                score += 20
+                components.append("LIQUIDITY_SWEEP")
+                sweep_detected = True
+
+                # Sweep sonrası displacement + MSS?
+                confirmation = self._find_post_sweep_confirmation(df, sweep, bias_for_sweep)
+                analysis["post_sweep_confirmation"] = confirmation
+                if confirmation:
+                    score += 15
+                    components.append("DISPLACEMENT")
+
+                    if confirmation["mss_confirmed"]:
+                        score += 10
+                        components.append("SWEEP_MSS_A_PLUS")
+                        sweep_mss_detected = True
+
+                    # Displacement FVG?
+                    disp_fvg = self._find_displacement_fvg(df, confirmation["displacement"]["index"], bias_for_sweep)
+                    analysis["displacement_fvg"] = disp_fvg
+                    if disp_fvg:
+                        score += 15
+                        components.append("FVG")
+                else:
+                    analysis["post_sweep_confirmation"] = None
+                    analysis["displacement_fvg"] = None
+            else:
+                analysis["sweep"] = None
+                analysis["post_sweep_confirmation"] = None
+                analysis["displacement_fvg"] = None
+        else:
+            analysis["sweep"] = None
+            analysis["post_sweep_confirmation"] = None
+            analysis["displacement_fvg"] = None
+
+        analysis["sweep_mss"] = sweep_mss_detected
+
+        # === ORDER BLOCKS (bonus) ===
+        active_obs, all_obs = self.find_order_blocks(df, structure)
+        analysis["order_blocks"] = active_obs
+        analysis["all_order_blocks"] = all_obs
+
+        relevant_obs = []
+        for ob in active_obs:
+            age = current_idx - ob["index"]
+            recency = 1.0 if age <= 5 else (0.8 if age <= 15 else 0.5)
+
+            if direction == "LONG" and ob["type"] == "BULLISH_OB":
+                if ob["low"] <= current_price <= ob["high"] * 1.005:
+                    relevant_obs.append(ob)
+                    score += 5 * recency
+                    components.append("ORDER_BLOCK")
+                    break
+            elif direction == "SHORT" and ob["type"] == "BEARISH_OB":
+                if ob["low"] <= current_price <= ob["high"] * 1.005:
+                    relevant_obs.append(ob)
+                    score += 5 * recency
+                    components.append("ORDER_BLOCK")
+                    break
+        analysis["relevant_obs"] = relevant_obs
+
+        # === BREAKER BLOCKS (bonus) ===
+        breaker_blocks = self.find_breaker_blocks(all_obs, df)
+        analysis["breaker_blocks"] = breaker_blocks
+        for bb in breaker_blocks:
+            if (direction == "LONG" and bb["type"] == "BULLISH_BREAKER") or \
+               (direction == "SHORT" and bb["type"] == "BEARISH_BREAKER"):
+                score += 5
+                components.append("BREAKER_BLOCK")
+                break
+
+        # === GENEL FVG KONTROLÜ (displacement FVG bulunamadıysa) ===
+        fvgs = self.find_fvg(df)
+        analysis["fvgs"] = fvgs
+
+        relevant_fvgs = []
+        if "FVG" not in components:
+            for fvg in fvgs:
+                fvg_age = current_idx - fvg["index"]
+                fvg_recency = 1.0 if fvg_age <= 8 else 0.6
+                if direction == "LONG" and fvg["type"] == "BULLISH_FVG":
+                    if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
+                        relevant_fvgs.append(fvg)
+                        score += 10 * fvg_recency
+                        components.append("FVG")
+                        break
+                elif direction == "SHORT" and fvg["type"] == "BEARISH_FVG":
+                    if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.002:
+                        relevant_fvgs.append(fvg)
+                        score += 10 * fvg_recency
+                        components.append("FVG")
+                        break
+        analysis["relevant_fvgs"] = relevant_fvgs
+
+        # === LIQUIDITY LEVELS ===
+        liquidity = self.find_liquidity_levels(df)
+        analysis["liquidity"] = liquidity
+
+        # === DISPLACEMENT (genel — sweep bağımsız) ===
+        if "DISPLACEMENT" not in components:
+            displacements = self.detect_displacement(df)
+            analysis["displacements"] = displacements
+            if displacements:
+                last_d = displacements[-1]
+                if (direction == "LONG" and last_d["direction"] == "BULLISH") or \
+                   (direction == "SHORT" and last_d["direction"] == "BEARISH"):
+                    score += 8
+                    components.append("DISPLACEMENT")
+            if "DISPLACEMENT" not in components:
+                score -= 8
+                penalties.append("NO_DISPLACEMENT(-8)")
+        else:
+            analysis["displacements"] = self.detect_displacement(df)
+
+        # === PREMIUM / DISCOUNT + OTE ===
+        pd_zone = self.calculate_premium_discount(df, structure)
+        analysis["premium_discount"] = pd_zone
+        if pd_zone:
+            if direction == "LONG" and pd_zone["zone"] == "DISCOUNT":
+                score += 7
+                components.append("DISCOUNT_ZONE")
+                if pd_zone["in_ote"]:
+                    score += 3
+                    components.append("OTE")
+            elif direction == "SHORT" and pd_zone["zone"] == "PREMIUM":
+                score += 7
+                components.append("PREMIUM_ZONE")
+                if pd_zone["in_ote"]:
+                    score += 3
+                    components.append("OTE")
+
+        # === SESSION KALİTESİ ===
+        if session_info["quality"] >= 0.8:
+            score += 5
+            components.append("KILLZONE_ACTIVE")
+        elif session_info["quality"] <= 0.3:
+            score -= 5
+            penalties.append("OFF_HOURS(-5)")
+
+        # === RANGING CEZASI ===
+        if is_ranging:
+            score -= 15
+            penalties.append("RANGING_MARKET(-15)")
+
+        # === TRIPLE TF ALIGNMENT ===
+        if "HTF_CONFIRMATION" in components and "MTF_CONFIRMATION" in components:
+            score += 3
+            components.append("TRIPLE_TF_ALIGNMENT")
+
+        # Normalize (0-100)
+        max_possible = 130  # tüm bonuslar dahil teorik max
+        score = max(0, score)
+        confluence_score = min(100, round((score / max_possible) * 100, 1))
 
         analysis["confluence_score"] = confluence_score
-        analysis["direction"] = direction
-        analysis["components"] = list(set(components_triggered))
+        analysis["components"] = list(set(components))
         analysis["penalties"] = penalties
-        analysis["current_price"] = current_price
 
         return analysis
 
-    # =================== SİNYAL ÜRETİMİ ===================
-
-    def generate_signal(self, symbol, df, multi_tf_data=None):
-        """
-        Analiz sonuçlarına göre sinyal üret veya izleme listesine al
-        Returns:
-            - signal dict (sinyal üretildiyse)
-            - watch dict (izlemeye alınsın)
-            - None (bir şey yok)
-        """
-        if df.empty or len(df) < 20:
-            return None
-
-        analysis = self.calculate_confluence(df, multi_tf_data)
-        confluence_score = analysis["confluence_score"]
-        direction = analysis["direction"]
-        current_price = analysis["current_price"]
-        min_confluence = self.params["min_confluence_score"]
-        min_confidence = self.params["min_confidence"]
-
-        if direction is None:
-            return None
-
-        # ===== HTF BIAS HARD FİLTRE =====
-        # 4H trend karşı yöndeyse → işlem açma, boşuna SL yeme
-        if analysis.get("htf_bias_block"):
-            htf_trend = analysis.get("htf_trend", "?")
-            logger.debug(f"  ⛔ {symbol} HTF Bias Block: 4H={htf_trend} vs sinyal={direction}")
-            return None
-
-        # Ranging market kontrolü → sinyal üretme
-        if analysis.get("is_ranging"):
-            logger.debug(f"  {symbol} ranging market - sinyal üretilmiyor")
-            return None
-
-        # Güven skoru hesapla (confluence + ek faktörler)
-        confidence = self._calculate_confidence(analysis)
-
-        # Entry, SL, TP hesapla
-        entry, sl, tp = self._calculate_levels(analysis, df)
-
-        if entry is None or sl is None or tp is None:
-            return None
-
-        # ===== YÖN DOĞRULAMASI =====
-        # LONG: SL < Entry < TP olmalı
-        # SHORT: TP < Entry < SL olmalı
-        if direction == "LONG":
-            if sl >= entry or tp <= entry:
-                logger.warning(f"❌ {symbol} LONG seviyeleri ters: Entry={entry} SL={sl} TP={tp}")
-                return None
-            risk = entry - sl
-            reward = tp - entry
-        elif direction == "SHORT":
-            if sl <= entry or tp >= entry:
-                logger.warning(f"❌ {symbol} SHORT seviyeleri ters: Entry={entry} SL={sl} TP={tp}")
-                return None
-            risk = sl - entry
-            reward = entry - tp
-        else:
-            return None
-
-        if risk <= 0:
-            return None
-
-        # Minimum SL mesafesi kontrolü (%0.3 - çok yakın SL volatilitede vurulur)
-        sl_distance_pct = risk / entry
-        if sl_distance_pct < 0.003:
-            logger.debug(f"  {symbol} SL çok yakın: %{sl_distance_pct*100:.2f} < %0.3")
-            return None
-
-        rr_ratio = reward / risk
-
-        if rr_ratio < 1.5:
-            return None  # Minimum 1.5 RR
-
-        result = {
-            "symbol": symbol,
-            "direction": direction,
-            "entry": round(entry, 8),
-            "sl": round(sl, 8),
-            "tp": round(tp, 8),
-            "current_price": round(current_price, 8),
-            "confluence_score": confluence_score,
-            "confidence": confidence,
-            "components": analysis["components"],
-            "penalties": analysis.get("penalties", []),
-            "session": analysis.get("session", {}).get("label", ""),
-            "rr_ratio": round(rr_ratio, 2),
-            "entry_type": self._get_entry_type(analysis, entry, current_price, direction),
-            "sl_type": self._get_sl_type(analysis, sl, direction),
-            "tp_type": self._get_tp_type(analysis, tp, direction),
-            "analysis": analysis
-        }
-
-        # Sinyal mi, izleme mi?
-        if confluence_score >= min_confluence and confidence >= min_confidence:
-            result["action"] = "SIGNAL"
-            session_label = analysis.get("session", {}).get("label", "")
-            logger.info(f"🎯 SİNYAL: {symbol} {direction} | Entry: {entry} | SL: {sl} | TP: {tp} | "
-                       f"Conf: {confidence}% | Score: {confluence_score} | Session: {session_label}")
-        elif confluence_score >= min_confluence * 0.7:
-            result["action"] = "WATCH"
-            result["watch_reason"] = self._get_watch_reason(analysis)
-            logger.info(f"👀 İZLEME: {symbol} {direction} | Score: {confluence_score} | "
-                       f"Conf: {confidence}% | Sebep: {result['watch_reason']}")
-        else:
-            return None
-
-        return result
+    # =================================================================
+    #  BÖLÜM 18 — GÜVEN SKORU HESAPLAMA
+    # =================================================================
 
     def _calculate_confidence(self, analysis):
         """
-        Güven skoru hesapla (0-100)
-        Confluence + ek kalite faktörleri + CEZA SİSTEMİ
-        
-        Eksik kritik bileşenler ceza alır:
-        - Displacement yoksa: -10
-        - OB veya FVG yoksa: -5
-        - Uygun bölgede değilse: -5
-        - Ranging market: -10
+        Güven skoru (0-100).
+        Confluence score + gate kalitesi + ceza sistemi.
         """
         base = analysis["confluence_score"]
         bonus = 0
         penalty = 0
+        components = analysis.get("components", [])
 
-        components = analysis["components"]
-        penalties = analysis.get("penalties", [])
-
-        # === BONUSLAR ===
-        # Birden fazla bileşen tetiklendiyse güven artar
+        # Çoklu bileşen bonusu
         comp_count = len(components)
-        if comp_count >= 5:
+        if comp_count >= 6:
             bonus += 12
         elif comp_count >= 4:
             bonus += 8
         elif comp_count >= 3:
             bonus += 4
 
-        # Güçlü trend varsa bonus
-        structure = analysis["structure"]
-        if structure["trend"] in ["BULLISH", "BEARISH"]:
-            bonus += 5
-
-        # Displacement varsa bonus
-        if "DISPLACEMENT" in components:
-            bonus += 5
-
-        # HTF onayı varsa bonus
+        # Gate bazlı bonuslar
         if "HTF_CONFIRMATION" in components:
             bonus += 5
-
-        # Triple TF alignment → ekstra bonus
+        if "LIQUIDITY_SWEEP" in components:
+            bonus += 5
+        if "DISPLACEMENT" in components:
+            bonus += 5
+        if "FVG" in components:
+            bonus += 3
+        if "SWEEP_MSS_A_PLUS" in components:
+            bonus += 10  # A+ setup → en güçlü sinyal
+        if "KILLZONE_ACTIVE" in components:
+            bonus += 3
+        if "BREAKER_BLOCK" in components:
+            bonus += 3
         if "TRIPLE_TF_ALIGNMENT" in components:
             bonus += 5
 
-        # Killzone aktifse bonus
-        if "KILLZONE_ACTIVE" in components:
-            bonus += 3
-
-        # Breaker Block varsa bonus
-        if "BREAKER_BLOCK" in components:
-            bonus += 5
-
-        # Sweep + MSS (A+ Setup) varsa → en güçlü sinyal
-        if "SWEEP_MSS_A_PLUS" in components:
-            bonus += 10
-
-        # HTF Bias Block → ciddi ceza
-        if analysis.get("htf_bias_block"):
-            penalty += 15
-
-        # === CEZALAR ===
-        # Displacement yoksa → kurumsal aktivite onayı eksik
+        # Cezalar
         if "DISPLACEMENT" not in components:
             penalty += 10
-
-        # OB ve FVG ikisi de yoksa → giriş noktası belirsiz
         if "ORDER_BLOCK" not in components and "FVG" not in components:
             penalty += 8
-
-        # Uygun bölgede değilse
         if "DISCOUNT_ZONE" not in components and "PREMIUM_ZONE" not in components and "OTE" not in components:
             penalty += 5
-
-        # WEAKENING trend cezası
-        if structure["trend"] in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
-            penalty += 5
-
-        # Ranging market cezası
+        if analysis.get("htf_bias_block"):
+            penalty += 15
         if analysis.get("is_ranging"):
             penalty += 10
 
-        # Off-hours cezası
+        structure = analysis.get("structure", {})
+        if structure.get("trend") in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
+            penalty += 5
+
         session = analysis.get("session", {})
         if session.get("quality", 1.0) <= 0.3:
             penalty += 5
@@ -1147,379 +1392,274 @@ class ICTStrategy:
         confidence = max(0, min(100, base + bonus - penalty))
         return round(confidence, 1)
 
-    def _calculate_levels(self, analysis, df):
-        """
-        ICT'ye uygun Entry, Stop Loss ve Take Profit hesapla.
+    # =================================================================
+    #  BÖLÜM 19 — SİNYAL ÜRETİMİ (Sequential Gate Protocol)
+    # =================================================================
 
-        ENTRY: OB seviyesi > FVG ortası > OTE bölgesi > Güncel fiyat
-        SL:    OB gövdesinin altı/üstü > Likidite sweep mumu > Swing yapısı
-        TP:    Karşı likidite havuzu > Karşı OB > Swing high/low yapısal hedef
+    def generate_signal(self, symbol, df, multi_tf_data=None):
         """
-        current_price = analysis["current_price"]
-        direction = analysis["direction"]
-        structure = analysis["structure"]
-        pd_zone = analysis.get("premium_discount")
+        ★ ANA SİNYAL ÜRETİMİ — Katı Sıralı ICT Protokolü.
 
-        if direction == "LONG":
-            entry = self._calc_long_entry(analysis, current_price, pd_zone)
-            sl = self._calc_long_sl(analysis, df, entry)
-            tp = self._calc_long_tp(analysis, df, entry, sl)
-        elif direction == "SHORT":
-            entry = self._calc_short_entry(analysis, current_price, pd_zone)
-            sl = self._calc_short_sl(analysis, df, entry)
-            tp = self._calc_short_tp(analysis, df, entry, sl)
+        Her adım bir GATE'tir:
+          Gate 1: HTF Bias → 4H trend yönü belirler
+          Gate 2: Liquidity Sweep → Eski swing seviyesinin temizlenmesi
+          Gate 3: Displacement + MSS → Tersine dönüş onayı
+          Gate 4: FVG Entry Zone → Giriş bölgesi tespiti
+
+        Tüm gate'ler geçerse → SIGNAL (FVG'ye limit emir)
+        Kısmi gate'ler → WATCH (izlemeye al)
+        Hiçbir gate geçmezse → None (sinyal yok)
+
+        Returns: signal dict veya None
+        """
+        if df.empty or len(df) < 30:
+            return None
+
+        current_price = df["close"].iloc[-1]
+
+        # ===== GATE 0: Ranging Market → Sinyal üretme =====
+        if self.detect_ranging_market(df):
+            return None
+
+        # ===== GATE 1: HTF Bias (4H) → Yön tayini =====
+        htf_result = self._analyze_htf_bias(multi_tf_data)
+        if htf_result is None:
+            return None  # HTF belirsiz → İŞLEM YOK
+        bias = htf_result["bias"]  # "LONG" veya "SHORT"
+
+        # LTF (15m) yapı analizi
+        structure = self.detect_market_structure(df)
+
+        # LTF trend HTF bias'a KARŞI mı? → Bekle (henüz dönmedi)
+        if bias == "LONG" and structure["trend"] == "BEARISH":
+            return None
+        if bias == "SHORT" and structure["trend"] == "BULLISH":
+            return None
+
+        # ===== GATE 2: Liquidity Sweep → Stop hunt tespiti =====
+        sweep = self._find_sweep_event(df, bias)
+        if sweep is None:
+            # Sweep yok → potansiyel WATCH sinyali kontrol et
+            return self._build_watch_from_potential(symbol, df, multi_tf_data, htf_result, structure, bias)
+
+        # ===== GATE 3: Displacement + MSS → Dönüş onayı =====
+        confirmation = self._find_post_sweep_confirmation(df, sweep, bias)
+        if confirmation is None:
+            # Sweep var ama displacement yok → WATCH
+            analysis = self.calculate_confluence(df, multi_tf_data)
+            confidence = self._calculate_confidence(analysis)
+            return self._build_signal_dict(
+                symbol, bias, current_price, analysis, confidence,
+                action="WATCH",
+                watch_reason="Sweep tespit edildi, displacement bekleniyor"
+            )
+
+        # ===== GATE 4: Displacement FVG → Giriş bölgesi =====
+        disp_idx = confirmation["displacement"]["index"]
+        entry_fvg = self._find_displacement_fvg(df, disp_idx, bias)
+        if entry_fvg is None:
+            analysis = self.calculate_confluence(df, multi_tf_data)
+            confidence = self._calculate_confidence(analysis)
+            return self._build_signal_dict(
+                symbol, bias, current_price, analysis, confidence,
+                action="WATCH",
+                watch_reason="Displacement sonrası FVG bekleniyor"
+            )
+
+        # ===== TÜM GATE'LER GEÇTİ — SİNYAL OLUŞTUR =====
+        logger.info(f"🎯 {symbol}: Tüm ICT gate'leri geçti: HTF={htf_result['htf_trend']}, "
+                    f"Sweep={sweep['sweep_type']}, Displacement+{'MSS' if confirmation['mss_confirmed'] else 'noMSS'}")
+
+        # FVG'nin CE noktası (Consequent Encroachment = orta nokta) = ENTRY
+        entry = (entry_fvg["high"] + entry_fvg["low"]) / 2
+
+        # Yapısal SL
+        sl = self._calc_structural_sl(df, sweep, bias, structure)
+        if sl is None:
+            return None
+
+        # Draw on Liquidity TP
+        tp = self._calc_opposing_liquidity_tp(df, multi_tf_data, entry, sl, bias, structure)
+        if tp is None:
+            return None
+
+        # Seviye doğrulama
+        if bias == "LONG":
+            if sl >= entry or tp <= entry:
+                logger.warning(f"❌ {symbol} LONG seviyeleri ters: E={entry} SL={sl} TP={tp}")
+                return None
+            risk = entry - sl
+            reward = tp - entry
         else:
-            return None, None, None
-
-        if entry is None or sl is None or tp is None:
-            return None, None, None
-
-        return entry, sl, tp
-
-    # =================== ICT ENTRY HESAPLAMA ===================
-
-    def _calc_long_entry(self, analysis, current_price, pd_zone):
-        """
-        LONG Entry - ICT öncelik sırası:
-        1. Bullish OB'nin üst kenarı (fiyat OB'ye geri çekilecek)
-        2. Bullish FVG ortası (boşluk dolumu)
-        3. OTE bölgesi (Fib 0.705 - 0.618 ile 0.786 ortası)
-        4. Güncel fiyat (yapısal onay varsa)
-        """
-        # 1. Aktif Bullish Order Block varsa → OB'nin üst kenarı (close seviyesi)
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if ob["type"] == "BULLISH_OB":
-                # OB'nin open seviyesi (bearish mumun open'ı = OB'nin üst kenarı)
-                ob_entry = ob["open"]
-                # Fiyat OB'ye yeterince yakınsa bu entry'yi kullan
-                if current_price <= ob_entry * 1.005:
-                    return ob_entry
-
-        # 2. Aktif Bullish FVG varsa → FVG'nin orta noktası
-        if analysis.get("relevant_fvgs"):
-            fvg = analysis["relevant_fvgs"][0]
-            if fvg["type"] == "BULLISH_FVG":
-                fvg_mid = (fvg["high"] + fvg["low"]) / 2
-                if current_price <= fvg["high"] * 1.003:
-                    return fvg_mid
-
-        # 3. OTE bölgesi (Fibonacci 0.618-0.786 ortası)
-        if pd_zone and pd_zone.get("in_ote"):
-            ote_mid = (pd_zone["ote_high"] + pd_zone["ote_low"]) / 2
-            return ote_mid
-
-        # 4. Fiyat discount bölgesindeyse → current price kabul edilebilir
-        if pd_zone and pd_zone["zone"] == "DISCOUNT":
-            return current_price
-
-        # 5. Güçlü displacement + yapısal onay varsa → current price
-        return current_price
-
-    def _calc_short_entry(self, analysis, current_price, pd_zone):
-        """
-        SHORT Entry - ICT öncelik sırası:
-        1. Bearish OB'nin alt kenarı (fiyat OB'ye geri çekilecek)
-        2. Bearish FVG ortası
-        3. OTE bölgesi (üstten fib)
-        4. Güncel fiyat
-        """
-        # 1. Aktif Bearish Order Block
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if ob["type"] == "BEARISH_OB":
-                ob_entry = ob["open"]  # Bullish mumun open'ı = OB'nin alt kenarı
-                if current_price >= ob_entry * 0.995:
-                    return ob_entry
-
-        # 2. Aktif Bearish FVG ortası
-        if analysis.get("relevant_fvgs"):
-            fvg = analysis["relevant_fvgs"][0]
-            if fvg["type"] == "BEARISH_FVG":
-                fvg_mid = (fvg["high"] + fvg["low"]) / 2
-                if current_price >= fvg["low"] * 0.997:
-                    return fvg_mid
-
-        # 3. OTE bölgesi (premium taraftan)
-        if pd_zone and pd_zone.get("in_ote"):
-            ote_mid = (pd_zone["ote_high"] + pd_zone["ote_low"]) / 2
-            return ote_mid
-
-        # 4. Premium bölgesindeyse
-        if pd_zone and pd_zone["zone"] == "PREMIUM":
-            return current_price
-
-        return current_price
-
-    # =================== ICT STOP LOSS HESAPLAMA ===================
-
-    def _calc_long_sl(self, analysis, df, entry):
-        """
-        LONG SL - ICT yapısal seviyeleri kullanır:
-        1. Kullanılan OB'nin tam low seviyesinin altı (OB invalidation)
-        2. Likidite sweep mumunun low'unun altı
-        3. Son swing low'un altı (yapısal invalidation)
-        Sabit yüzde KULLANILMAZ - her zaman yapısal seviye.
-        """
-        sl_candidates = []
-
-        # 1. Bullish OB'nin low'u → OB invalidation seviyesi
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if ob["type"] == "BULLISH_OB":
-                # OB'nin low'unun biraz altı (wick buffer)
-                ob_sl = ob["low"] * 0.997
-                sl_candidates.append(("OB_LOW", ob_sl))
-
-        # 2. Likidite sweep yapılan mumun low'u
-        liquidity = analysis.get("liquidity", [])
-        for liq in liquidity:
-            if liq["type"] == "EQUAL_LOWS" and liq["swept"]:
-                # Sweep edilen seviyenin biraz altı
-                sweep_sl = liq["price"] * 0.996
-                sl_candidates.append(("LIQ_SWEEP", sweep_sl))
-
-        # 3. Son swing low (yapısal invalidation)
-        structure = analysis["structure"]
-        if structure["last_swing_low"]:
-            swing_sl = structure["last_swing_low"]["price"] * 0.997
-            sl_candidates.append(("SWING_LOW", swing_sl))
-
-        if not sl_candidates:
-            return None
-
-        # En yakın yapısal SL'yi seç (entry'ye en yakın ama altında olan)
-        valid_sls = [(name, price) for name, price in sl_candidates if price < entry]
-        if not valid_sls:
-            return None
-
-        # En yakın olanı seç (gereksiz büyük SL'den kaçın)
-        best_sl = max(valid_sls, key=lambda x: x[1])
-
-        # SL mesafesi entry'nin %8'inden fazlaysa, en yakın yapısal seviyeyi kullan
-        sl_distance_pct = abs(entry - best_sl[1]) / entry
-        if sl_distance_pct > 0.08:
-            # Çok uzak, daha yakın bir yapısal seviye ara
-            closer = [s for s in valid_sls if abs(entry - s[1]) / entry <= 0.04]
-            if closer:
-                best_sl = max(closer, key=lambda x: x[1])
-            else:
-                # Hiç yakın yapısal seviye yoksa None dön (sinyal üretme)
+            if sl <= entry or tp >= entry:
+                logger.warning(f"❌ {symbol} SHORT seviyeleri ters: E={entry} SL={sl} TP={tp}")
                 return None
+            risk = sl - entry
+            reward = entry - tp
 
-        logger.debug(f"  LONG SL: {best_sl[0]} @ {best_sl[1]:.8f}")
-        return best_sl[1]
-
-    def _calc_short_sl(self, analysis, df, entry):
-        """
-        SHORT SL - ICT yapısal seviyeleri:
-        1. Bearish OB'nin high'ının üstü (OB invalidation)
-        2. Likidite sweep mumunun high'ının üstü
-        3. Son swing high'ın üstü
-        """
-        sl_candidates = []
-
-        # 1. Bearish OB high
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if ob["type"] == "BEARISH_OB":
-                ob_sl = ob["high"] * 1.003
-                sl_candidates.append(("OB_HIGH", ob_sl))
-
-        # 2. Likidite sweep
-        liquidity = analysis.get("liquidity", [])
-        for liq in liquidity:
-            if liq["type"] == "EQUAL_HIGHS" and liq["swept"]:
-                sweep_sl = liq["price"] * 1.004
-                sl_candidates.append(("LIQ_SWEEP", sweep_sl))
-
-        # 3. Son swing high
-        structure = analysis["structure"]
-        if structure["last_swing_high"]:
-            swing_sl = structure["last_swing_high"]["price"] * 1.003
-            sl_candidates.append(("SWING_HIGH", swing_sl))
-
-        if not sl_candidates:
+        if risk <= 0:
             return None
 
-        valid_sls = [(name, price) for name, price in sl_candidates if price > entry]
-        if not valid_sls:
+        rr_ratio = reward / risk
+        if rr_ratio < 1.5:
             return None
 
-        # En yakın olanı seç
-        best_sl = min(valid_sls, key=lambda x: x[1])
+        # SL mesafesi kontrolleri
+        sl_distance_pct = risk / entry
+        if sl_distance_pct < 0.003:
+            return None  # SL çok yakın → volatilitede vurulur
+        if sl_distance_pct > 0.06:
+            return None  # SL çok uzak → risk çok yüksek
 
-        sl_distance_pct = abs(best_sl[1] - entry) / entry
-        if sl_distance_pct > 0.08:
-            closer = [s for s in valid_sls if abs(s[1] - entry) / entry <= 0.04]
-            if closer:
-                best_sl = min(closer, key=lambda x: x[1])
-            else:
-                return None
+        # Entry modu: Fiyat FVG bölgesinde mi?
+        if bias == "LONG":
+            price_at_fvg = entry_fvg["low"] * 0.998 <= current_price <= entry_fvg["high"] * 1.002
+        else:
+            price_at_fvg = entry_fvg["low"] * 0.998 <= current_price <= entry_fvg["high"] * 1.002
+        entry_mode = "MARKET" if price_at_fvg else "LIMIT"
 
-        logger.debug(f"  SHORT SL: {best_sl[0]} @ {best_sl[1]:.8f}")
-        return best_sl[1]
+        # Confluence ve confidence hesapla
+        analysis = self.calculate_confluence(df, multi_tf_data)
+        confluence_score = analysis["confluence_score"]
+        confidence = self._calculate_confidence(analysis)
 
-    # =================== ICT TAKE PROFIT HESAPLAMA ===================
+        # Minimum eşikler
+        min_confluence = self.params.get("min_confluence_score", 70)
+        min_confidence = self.params.get("min_confidence", 75)
 
-    def _calc_long_tp(self, analysis, df, entry, sl):
-        """
-        LONG TP - ICT Draw on Liquidity (karşı likiditeyi hedefle):
-        1. HTF (4H) karşı likiditesi (en güçlü mıknatıs)
-        2. LTF karşı taraf likiditesi (equal highs)
-        3. Bearish Order Block seviyesi (karşı OB)
-        4. Son swing high (yapısal direnç)
-        5. Fallback: Minimum R:R
-        """
-        tp_candidates = []
-        structure = analysis["structure"]
+        session = self.get_session_info()
+        components = analysis.get("components", [])
 
-        # 0. HTF (4H) Draw on Liquidity → en güçlü hedef
-        htf_liquidity = analysis.get("htf_liquidity", [])
-        for liq in htf_liquidity:
-            if liq["type"] == "EQUAL_HIGHS" and not liq["swept"]:
-                if liq["price"] > entry:
-                    tp_candidates.append(("HTF_DRAW_ON_LIQ", liq["price"] * 0.999))
+        result = {
+            "symbol": symbol,
+            "direction": bias,
+            "entry": round(entry, 8),
+            "sl": round(sl, 8),
+            "tp": round(tp, 8),
+            "current_price": round(current_price, 8),
+            "confluence_score": confluence_score,
+            "confidence": confidence,
+            "components": components,
+            "penalties": analysis.get("penalties", []),
+            "session": session.get("label", ""),
+            "rr_ratio": round(rr_ratio, 2),
+            "entry_type": f"FVG Limit ({entry_fvg['type']})" if entry_mode == "LIMIT" else f"FVG Market ({entry_fvg['type']})",
+            "sl_type": "Yapısal Seviye (Sweep Invalidation)",
+            "tp_type": self._get_tp_type(analysis, tp, bias),
+            "entry_mode": entry_mode,
+            "htf_bias": htf_result["htf_trend"],
+            "sweep_level": sweep["swept_level"],
+            "analysis": analysis
+        }
 
-        # 1. LTF Sell-side liquidity (equal highs) → ana hedef
-        liquidity = analysis.get("liquidity", [])
-        for liq in liquidity:
-            if liq["type"] == "EQUAL_HIGHS" and not liq["swept"]:
-                if liq["price"] > entry:
-                    tp_candidates.append(("LIQUIDITY_HIGHS", liq["price"] * 0.999))
-
-        # 2. Bearish Order Blocks (karşı OB) → fiyat burada tepki verir
-        all_obs = analysis.get("order_blocks", [])
-        for ob in all_obs:
-            if ob["type"] == "BEARISH_OB" and ob["low"] > entry:
-                tp_candidates.append(("OPPOSING_OB", ob["low"]))
-
-        # 3. Son swing high → yapısal direnç
-        if structure["last_swing_high"] and structure["last_swing_high"]["price"] > entry:
-            tp_candidates.append(("SWING_HIGH", structure["last_swing_high"]["price"] * 0.998))
-
-        # 4. Önceki swing high'lar
-        for sh in structure.get("swing_highs", []):
-            if sh["price"] > entry * 1.005:
-                tp_candidates.append(("PREV_SWING_HIGH", sh["price"] * 0.998))
-
-        if not tp_candidates:
-            # Fallback: Yapısal hedef bulunamazsa minimum R:R ile hesapla
-            if sl is not None and sl < entry:
-                risk = entry - sl
-                min_tp_ratio = self.params.get("default_tp_ratio", 2.5)
-                return entry + (risk * min_tp_ratio)
+        # Sinyal mi, izleme mi?
+        if confluence_score >= min_confluence and confidence >= min_confidence:
+            result["action"] = "SIGNAL"
+            logger.info(
+                f"🎯 SİNYAL: {symbol} {bias} | Entry: {entry:.8f} | SL: {sl:.8f} | TP: {tp:.8f} | "
+                f"RR: {rr_ratio:.1f} | Score: {confluence_score} | Conf: {confidence}% | "
+                f"Mode: {entry_mode} | Session: {session['label']}"
+            )
+        elif confluence_score >= min_confluence * 0.7:
+            result["action"] = "WATCH"
+            result["watch_reason"] = self._get_watch_reason(analysis)
+            logger.info(
+                f"👀 İZLEME: {symbol} {bias} | Score: {confluence_score} | "
+                f"Conf: {confidence}% | Sebep: {result['watch_reason']}"
+            )
+        else:
             return None
 
-        # En yakın mantıklı hedefi seç
-        # Minimum 1.5 R:R sağlayan en yakın yapısal hedef
-        risk = entry - sl if sl else entry * 0.015
-        min_reward = risk * 1.5
+        return result
 
-        valid_tps = [(name, price) for name, price in tp_candidates
-                     if (price - entry) >= min_reward]
+    # =================================================================
+    #  BÖLÜM 20 — YARDIMCI METODLAR
+    # =================================================================
 
-        if valid_tps:
-            # En yakın yapısal hedefi seç (muhafazakar yaklaşım)
-            best_tp = min(valid_tps, key=lambda x: x[1])
-            logger.debug(f"  LONG TP: {best_tp[0]} @ {best_tp[1]:.8f}")
-            return best_tp[1]
-
-        # Hiçbir yapısal hedef 1.5 RR sağlamıyorsa, en yüksek hedefi dene
-        if tp_candidates:
-            best_tp = max(tp_candidates, key=lambda x: x[1])
-            if (best_tp[1] - entry) > risk * 1.0:  # En az 1:1
-                return best_tp[1]
-
-        # Gerçekten hiçbir hedef yoksa minimum R:R kullan
-        min_tp_ratio = self.params.get("default_tp_ratio", 2.5)
-        return entry + (risk * min_tp_ratio)
-
-    def _calc_short_tp(self, analysis, df, entry, sl):
+    def _build_watch_from_potential(self, symbol, df, multi_tf_data, htf_result, structure, bias):
         """
-        SHORT TP - ICT Draw on Liquidity (karşı likiditeyi hedefle):
-        1. HTF (4H) karşı likiditesi (en güçlü mıknatıs)
-        2. LTF karşı taraf likiditesi (equal lows)
-        3. Bullish Order Block seviyesi (karşı OB)
-        4. Son swing low (yapısal destek)
-        5. Fallback: Minimum R:R
+        Sweep henüz olmadığında potansiyel WATCH sinyali oluştur.
+        Sadece yeterli potansiyel varsa (yüksek skor) döndürür.
         """
-        tp_candidates = []
-        structure = analysis["structure"]
+        analysis = self.calculate_confluence(df, multi_tf_data)
+        confluence_score = analysis["confluence_score"]
+        min_confluence = self.params.get("min_confluence_score", 70)
 
-        # 0. HTF (4H) Draw on Liquidity → en güçlü hedef
-        htf_liquidity = analysis.get("htf_liquidity", [])
-        for liq in htf_liquidity:
-            if liq["type"] == "EQUAL_LOWS" and not liq["swept"]:
-                if liq["price"] < entry:
-                    tp_candidates.append(("HTF_DRAW_ON_LIQ", liq["price"] * 1.001))
-
-        # 1. LTF Buy-side liquidity (equal lows)
-        liquidity = analysis.get("liquidity", [])
-        for liq in liquidity:
-            if liq["type"] == "EQUAL_LOWS" and not liq["swept"]:
-                if liq["price"] < entry:
-                    tp_candidates.append(("LIQUIDITY_LOWS", liq["price"] * 1.001))
-
-        # 2. Bullish Order Blocks (karşı OB)
-        all_obs = analysis.get("order_blocks", [])
-        for ob in all_obs:
-            if ob["type"] == "BULLISH_OB" and ob["high"] < entry:
-                tp_candidates.append(("OPPOSING_OB", ob["high"]))
-
-        # 3. Son swing low
-        if structure["last_swing_low"] and structure["last_swing_low"]["price"] < entry:
-            tp_candidates.append(("SWING_LOW", structure["last_swing_low"]["price"] * 1.002))
-
-        # 4. Önceki swing low'lar
-        for sl_point in structure.get("swing_lows", []):
-            if sl_point["price"] < entry * 0.995:
-                tp_candidates.append(("PREV_SWING_LOW", sl_point["price"] * 1.002))
-
-        if not tp_candidates:
-            if sl is not None and sl > entry:
-                risk = sl - entry
-                min_tp_ratio = self.params.get("default_tp_ratio", 2.5)
-                return entry - (risk * min_tp_ratio)
+        # En az %60 potansiyel olmalı (sweep olmadan SIGNAL asla olmaz)
+        if confluence_score < min_confluence * 0.6:
             return None
 
-        risk = sl - entry if sl else entry * 0.015
-        min_reward = risk * 1.5
+        confidence = self._calculate_confidence(analysis)
+        current_price = df["close"].iloc[-1]
 
-        valid_tps = [(name, price) for name, price in tp_candidates
-                     if (entry - price) >= min_reward]
+        return self._build_signal_dict(
+            symbol, bias, current_price, analysis, confidence,
+            action="WATCH",
+            watch_reason="HTF bias uyumlu, likidite avı bekleniyor"
+        )
 
-        if valid_tps:
-            best_tp = max(valid_tps, key=lambda x: x[1])
-            logger.debug(f"  SHORT TP: {best_tp[0]} @ {best_tp[1]:.8f}")
-            return best_tp[1]
+    def _build_signal_dict(self, symbol, bias, current_price, analysis, confidence,
+                           action="WATCH", watch_reason=""):
+        """WATCH sinyalleri için ortak dict oluşturucu."""
+        # Basit SL/TP tahmini (WATCH için yaklaşık)
+        structure = analysis.get("structure", {})
+        sl_pct = self.params.get("default_sl_pct", 0.015)
+        tp_ratio = self.params.get("default_tp_ratio", 2.5)
 
-        if tp_candidates:
-            best_tp = min(tp_candidates, key=lambda x: x[1])
-            if (entry - best_tp[1]) > risk * 1.0:
-                return best_tp[1]
+        if bias == "LONG":
+            sl = current_price * (1 - sl_pct)
+            tp = current_price * (1 + sl_pct * tp_ratio)
+        else:
+            sl = current_price * (1 + sl_pct)
+            tp = current_price * (1 - sl_pct * tp_ratio)
 
-        min_tp_ratio = self.params.get("default_tp_ratio", 2.5)
-        return entry - (risk * min_tp_ratio)
+        risk = abs(current_price - sl)
+        reward = abs(tp - current_price)
+        rr_ratio = reward / risk if risk > 0 else 1.0
+
+        session = self.get_session_info()
+
+        result = {
+            "symbol": symbol,
+            "direction": bias,
+            "entry": round(current_price, 8),
+            "sl": round(sl, 8),
+            "tp": round(tp, 8),
+            "current_price": round(current_price, 8),
+            "confluence_score": analysis.get("confluence_score", 0),
+            "confidence": confidence,
+            "components": analysis.get("components", []),
+            "penalties": analysis.get("penalties", []),
+            "session": session.get("label", ""),
+            "rr_ratio": round(rr_ratio, 2),
+            "entry_type": "Potansiyel (onay bekleniyor)",
+            "sl_type": "Tahmini (onay sonrası kesinleşecek)",
+            "tp_type": "Tahmini (onay sonrası kesinleşecek)",
+            "entry_mode": "PENDING",
+            "action": action,
+            "watch_reason": watch_reason,
+            "analysis": analysis
+        }
+
+        return result
 
     def _get_watch_reason(self, analysis):
-        """İzleme sebebini açıkla"""
+        """İzleme sebebini açıkla (hangi gate eksik)."""
         reasons = []
-        components = analysis["components"]
+        components = analysis.get("components", [])
         penalties = analysis.get("penalties", [])
 
-        if "MARKET_STRUCTURE" not in components:
-            reasons.append("Yapı onayı bekleniyor")
-        if "ORDER_BLOCK" not in components:
-            reasons.append("OB temas bekleniyor")
-        if "FVG" not in components:
-            reasons.append("FVG dolumu bekleniyor")
+        if "HTF_CONFIRMATION" not in components:
+            reasons.append("HTF onayı bekleniyor")
+        if "LIQUIDITY_SWEEP" not in components:
+            reasons.append("Likidite avı bekleniyor")
         if "DISPLACEMENT" not in components:
             reasons.append("Displacement bekleniyor")
-        if "HTF_CONFIRMATION" not in components and "MTF_CONFIRMATION" not in components:
-            reasons.append("MTF/HTF onayı bekleniyor")
+        if "FVG" not in components:
+            reasons.append("FVG dolumu bekleniyor")
+        if "MARKET_STRUCTURE" not in components:
+            reasons.append("Yapı onayı bekleniyor")
 
-        # Ceza sebeplerini ekle
         for p in penalties:
             if "OFF_HOURS" in p:
                 reasons.append("Killzone dışı saat")
@@ -1527,74 +1667,35 @@ class ICTStrategy:
                 reasons.append("Yatay piyasa")
 
         if not reasons:
-            reasons.append("Güven skoru düşük, onay bekleniyor")
+            reasons.append("Skor yetersiz, ek onay bekleniyor")
 
         return " | ".join(reasons[:3])
 
-    def _get_entry_type(self, analysis, entry, current_price, direction):
-        """Entry seviyesinin ICT kaynağını belirle"""
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if direction == "LONG" and ob["type"] == "BULLISH_OB":
-                if abs(entry - ob["open"]) / entry < 0.003:
-                    return "Order Block (OB üst kenar)"
-            elif direction == "SHORT" and ob["type"] == "BEARISH_OB":
-                if abs(entry - ob["open"]) / entry < 0.003:
-                    return "Order Block (OB alt kenar)"
-
-        if analysis.get("relevant_fvgs"):
-            fvg = analysis["relevant_fvgs"][0]
-            fvg_mid = (fvg["high"] + fvg["low"]) / 2
-            if abs(entry - fvg_mid) / entry < 0.003:
-                return "FVG Orta Nokta"
-
-        pd_zone = analysis.get("premium_discount")
-        if pd_zone and pd_zone.get("in_ote"):
-            ote_mid = (pd_zone["ote_high"] + pd_zone["ote_low"]) / 2
-            if abs(entry - ote_mid) / entry < 0.005:
-                return "OTE Bölgesi (Fib 0.618-0.786)"
-
-        if abs(entry - current_price) / entry < 0.001:
-            if pd_zone:
-                return f"Güncel Fiyat ({pd_zone['zone']} bölgesi)"
-            return "Güncel Fiyat"
-
-        return "Yapısal Seviye"
-
-    def _get_sl_type(self, analysis, sl, direction):
-        """SL seviyesinin ICT kaynağını belirle"""
-        if analysis.get("relevant_obs"):
-            ob = analysis["relevant_obs"][0]
-            if direction == "LONG" and ob["type"] == "BULLISH_OB":
-                if abs(sl - ob["low"] * 0.997) / sl < 0.005:
-                    return "OB Invalidation (OB low altı)"
-            elif direction == "SHORT" and ob["type"] == "BEARISH_OB":
-                if abs(sl - ob["high"] * 1.003) / sl < 0.005:
-                    return "OB Invalidation (OB high üstü)"
-
-        structure = analysis["structure"]
-        if direction == "LONG" and structure["last_swing_low"]:
-            if abs(sl - structure["last_swing_low"]["price"] * 0.997) / sl < 0.005:
-                return "Swing Low Yapısal Seviye"
-        elif direction == "SHORT" and structure["last_swing_high"]:
-            if abs(sl - structure["last_swing_high"]["price"] * 1.003) / sl < 0.005:
-                return "Swing High Yapısal Seviye"
-
-        return "Likidite Sweep Seviyesi"
-
     def _get_tp_type(self, analysis, tp, direction):
-        """TP seviyesinin ICT kaynağını belirle"""
-        liquidity = analysis.get("liquidity", [])
-        for liq in liquidity:
+        """TP seviyesinin ICT kaynağını belirle."""
+        # HTF Draw on Liquidity?
+        htf_liq = analysis.get("htf_liquidity", [])
+        for liq in htf_liq:
             if direction == "LONG" and liq["type"] == "EQUAL_HIGHS" and not liq["swept"]:
                 if abs(tp - liq["price"]) / tp < 0.005:
-                    return "Karşı Likidite (Equal Highs)"
+                    return "HTF Draw on Liquidity (4H Equal Highs)"
             elif direction == "SHORT" and liq["type"] == "EQUAL_LOWS" and not liq["swept"]:
+                if abs(tp - liq["price"]) / tp < 0.005:
+                    return "HTF Draw on Liquidity (4H Equal Lows)"
+
+        # LTF liquidity?
+        liq_levels = analysis.get("liquidity", [])
+        for liq in liq_levels:
+            if direction == "LONG" and liq["type"] == "EQUAL_HIGHS":
+                if abs(tp - liq["price"]) / tp < 0.005:
+                    return "Karşı Likidite (Equal Highs)"
+            elif direction == "SHORT" and liq["type"] == "EQUAL_LOWS":
                 if abs(tp - liq["price"]) / tp < 0.005:
                     return "Karşı Likidite (Equal Lows)"
 
-        all_obs = analysis.get("order_blocks", [])
-        for ob in all_obs:
+        # Order Block?
+        obs = analysis.get("order_blocks", [])
+        for ob in obs:
             if direction == "LONG" and ob["type"] == "BEARISH_OB":
                 if abs(tp - ob["low"]) / tp < 0.005:
                     return "Karşı Order Block (Bearish OB)"
@@ -1602,7 +1703,8 @@ class ICTStrategy:
                 if abs(tp - ob["high"]) / tp < 0.005:
                     return "Karşı Order Block (Bullish OB)"
 
-        structure = analysis["structure"]
+        # Swing yapısı?
+        structure = analysis.get("structure", {})
         if direction == "LONG":
             for sh in structure.get("swing_highs", []):
                 if abs(tp - sh["price"]) / tp < 0.005:

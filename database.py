@@ -84,6 +84,15 @@ def init_db():
     if "expire_reason" not in existing_cols:
         conn.execute("ALTER TABLE watchlist ADD COLUMN expire_reason TEXT")
 
+    # Signals tablosuna yeni kolonlar (v2.0 limit emir desteği)
+    signal_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
+    }
+    if "entry_mode" not in signal_cols:
+        conn.execute("ALTER TABLE signals ADD COLUMN entry_mode TEXT DEFAULT 'MARKET'")
+    if "htf_bias" not in signal_cols:
+        conn.execute("ALTER TABLE signals ADD COLUMN htf_bias TEXT")
+
     # Optimizasyon logları
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS optimization_logs (

@@ -213,22 +213,27 @@ class OKXDataFetcher:
     def get_multi_timeframe_data(self, symbol):
         """
         Birden fazla zaman diliminde veri çek
-        HTF (4H) -> Yapı analizi
-        MTF (1H) -> Sinyal onayı
-        LTF (15m) -> Giriş noktası
+        HTF (4H)  -> Yapı analizi + HTF Bias Gate
+        MTF (1H)  -> Sinyal onayı + MTF trend kontrolü
+        LTF (15m) -> Giriş noktası + Sweep/Displacement/FVG tespiti
+        5m        -> Watchlist onay akışı (5 dakikalık mum takibi)
         """
         data = {}
         
-        # 4 saatlik - yapı analizi için
+        # 4 saatlik - HTF Bias (yapı analizi)
         data["4H"] = self.get_candles(symbol, "4H", 100)
         time.sleep(0.1)  # Rate limit
 
-        # 1 saatlik - sinyal onayı için
+        # 1 saatlik - MTF (sinyal onayı)
         data["1H"] = self.get_candles(symbol, "1H", 100)
         time.sleep(0.1)
 
-        # 15 dakikalık - giriş noktası için
+        # 15 dakikalık - LTF (giriş noktası)
         data["15m"] = self.get_candles(symbol, "15m", 100)
+        time.sleep(0.1)
+
+        # 5 dakikalık - Watchlist onay akışı
+        data["5m"] = self.get_candles(symbol, "5m", 120)
 
         return data
 

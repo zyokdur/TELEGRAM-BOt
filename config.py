@@ -69,6 +69,10 @@ ICT_PARAMS = {
     "displacement_min_size_pct": 0.005,  # Min displacement boyutu (%0.5)
 }
 
+# Limit Emir Ayarları
+LIMIT_ORDER_EXPIRY_HOURS = 6  # Limit emir geçerlilik süresi (saat)
+                              # FVG'ye limit emir koyulduğunda max bekleme zamanı
+
 # Optimizer Parametreleri
 OPTIMIZER_CONFIG = {
     "min_trades_for_optimization": 10,   # Optimizasyon için minimum işlem sayısı
