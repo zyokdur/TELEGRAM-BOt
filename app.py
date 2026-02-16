@@ -84,7 +84,6 @@ def scan_markets():
 
         if not active_coins:
             logger.warning("OKX'ten yüksek hacimli coin bulunamadı, bağlantı kontrol edin")
-            scan_lock.release()
             return
 
         for symbol in active_coins:

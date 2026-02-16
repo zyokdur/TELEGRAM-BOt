@@ -11,7 +11,7 @@ from database import (
     get_active_signals, update_signal_status, activate_signal,
     get_active_trade_count, add_signal, add_to_watchlist,
     get_watching_items, update_watchlist_item, promote_watchlist_item,
-    expire_watchlist_item, get_signal_history
+    expire_watchlist_item, get_signal_history, get_bot_param
 )
 from config import ICT_PARAMS
 
@@ -22,9 +22,12 @@ class TradeManager:
     """Açık işlemlerin yönetimi ve takibi"""
 
     def __init__(self):
-        self.max_concurrent = ICT_PARAMS["max_concurrent_trades"]
         # Breakeven/Trailing SL takibi: {signal_id: {"breakeven_moved": bool, "trailing_sl": float}}
         self._trade_state = {}
+
+    def _param(self, name):
+        """Optimizer ile güncellenen parametreleri DB'den oku, yoksa varsayılanı kullan."""
+        return get_bot_param(name, ICT_PARAMS[name])
 
     def process_signal(self, signal_result):
         """
@@ -47,9 +50,10 @@ class TradeManager:
     def _open_trade(self, signal):
         """Yeni işlem aç"""
         # Max eşzamanlı işlem kontrolü
+        max_concurrent = int(self._param("max_concurrent_trades"))
         active_count = get_active_trade_count()
-        if active_count >= self.max_concurrent:
-            logger.warning(f"Maksimum eşzamanlı işlem limitine ulaşıldı ({self.max_concurrent})")
+        if active_count >= max_concurrent:
+            logger.warning(f"Maksimum eşzamanlı işlem limitine ulaşıldı ({max_concurrent})")
             return {"status": "REJECTED", "reason": "Maksimum işlem limiti"}
 
         # Aynı coinde aktif işlem var mı?
@@ -62,7 +66,7 @@ class TradeManager:
         # Son 15 dakikada aynı coinde işlem yapılmış mı? (cooldown)
         from datetime import datetime, timedelta
         recent_history = get_signal_history(30)
-        cooldown_minutes = 15
+        cooldown_minutes = int(self._param("signal_cooldown_minutes"))
         now = datetime.now()
         for s in recent_history:
             if s["symbol"] == signal["symbol"]:
@@ -108,6 +112,7 @@ class TradeManager:
 
     def _add_to_watch(self, signal):
         """İzleme listesine ekle"""
+        watch_candles = int(self._param("patience_watch_candles"))
         watch_id = add_to_watchlist(
             symbol=signal["symbol"],
             direction=signal["direction"],
@@ -117,7 +122,7 @@ class TradeManager:
             watch_reason=signal.get("watch_reason", "Onay bekleniyor"),
             initial_score=signal["confluence_score"],
             components=signal["components"],
-            max_watch=int(ICT_PARAMS["patience_watch_candles"])
+            max_watch=watch_candles
         )
 
         logger.info(f"👁️ İZLEMEYE ALINDI: {signal['symbol']} {signal['direction']} | "
@@ -311,12 +316,13 @@ class TradeManager:
             candles_watched = item["candles_watched"] + 1
             max_watch = item["max_watch_candles"]
 
-            # Yeni veri çek ve tekrar analiz et
-            df = data_fetcher.get_candles(symbol, "15m", 100)
-            if df.empty:
+            # Yeni veri çek ve tekrar analiz et (ilk tarama ile aynı şekilde multi-timeframe)
+            multi_tf = data_fetcher.get_multi_timeframe_data(symbol)
+            df = multi_tf.get("15m") if multi_tf else None
+            if df is None or df.empty:
                 continue
 
-            analysis = strategy_engine.calculate_confluence(df)
+            analysis = strategy_engine.calculate_confluence(df, multi_tf)
             new_score = analysis["confluence_score"]
             min_confluence = strategy_engine.params["min_confluence_score"]
             min_confidence = strategy_engine.params["min_confidence"]
@@ -324,11 +330,10 @@ class TradeManager:
             confidence = strategy_engine._calculate_confidence(analysis)
 
             if new_score >= min_confluence and confidence >= min_confidence:
-                # Sinyal olgunlaştı - promote et
-                promote_watchlist_item(item["id"])
-
-                signal_result = strategy_engine.generate_signal(symbol, df)
+                # Sinyal olgunlaştı mı gerçekten kontrol et (multi-timeframe ile)
+                signal_result = strategy_engine.generate_signal(symbol, df, multi_tf)
                 if signal_result and signal_result["action"] == "SIGNAL":
+                    promote_watchlist_item(item["id"])
                     trade_result = self._open_trade(signal_result)
                     promoted.append({
                         "symbol": symbol,
@@ -337,7 +342,7 @@ class TradeManager:
                     })
                     logger.info(f"⬆️ İZLEMEDEN SİNYALE: {symbol} | "
                               f"Score: {item['initial_score']} -> {new_score}")
-                continue
+                    continue
 
             if candles_watched >= max_watch:
                 # Süre doldu ve yeterli skor yok - expire et
