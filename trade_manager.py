@@ -158,7 +158,10 @@ class TradeManager:
             components=signal["components"],
             timeframe="15m",
             status=initial_status,
-            notes=entry_reasons
+            notes=entry_reasons,
+            entry_mode=entry_mode,
+            htf_bias=signal.get("htf_bias"),
+            rr_ratio=signal.get("rr_ratio")
         )
 
         if initial_status == "ACTIVE":

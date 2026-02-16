@@ -1,8 +1,20 @@
 # =====================================================
-# ICT Trading Bot - Otomatik Optimizasyon Modülü
+# ICT Trading Bot - Otomatik Optimizasyon Modülü v2.0
+# (Smart Money Concepts - Öğrenen Motor)
 # =====================================================
-# Kazanma/kaybetme havuzunu analiz ederek parametreleri
-# otomatik günceller ve sürekli öğrenir.
+# Kazanma/kaybetme havuzunu + confluence-kârlılık
+# korelasyonunu analiz ederek ICT parametrelerini
+# otomatik günceller, HTF bias/entry mode performans
+# karşılaştırması yapar ve sürekli öğrenir.
+#
+# v2.0 EKLENENLER:
+#   - Confluence Score ↔ Kârlılık korelasyon analizi
+#   - Entry Mode (LIMIT vs MARKET) performans karşılaştırması
+#   - HTF Bias doğruluk takibi
+#   - min_confluence_score otomatik kalibrasyonu
+#   - fvg_min_size_pct, liquidity_min_touches,
+#     liquidity_sweep_lookback ICT parametreleri optimizasyonu
+#   - Sweep olmadan girilen kayıp analizi
 # =====================================================
 
 import logging
@@ -11,7 +23,9 @@ from datetime import datetime
 from database import (
     get_completed_signals, get_performance_summary,
     get_component_performance, save_bot_param, get_bot_param,
-    add_optimization_log, get_all_bot_params, get_loss_analysis
+    add_optimization_log, get_all_bot_params, get_loss_analysis,
+    get_confluence_profitability_analysis, get_entry_mode_performance,
+    get_htf_bias_accuracy
 )
 from config import ICT_PARAMS, OPTIMIZER_CONFIG
 
@@ -37,7 +51,19 @@ class SelfOptimizer:
         self.optimization_history = []
 
     def run_optimization(self):
-        """Ana optimizasyon döngüsü"""
+        """
+        Ana optimizasyon döngüsü.
+        
+        Adımlar:
+          1. Win Rate → güven eşiği kalibrasyonu
+          2. İCT bileşen performansı → parametre ince ayar
+          3. Confluence Score ↔ Kârlılık korelasyonu → optimal skor tespiti
+          4. Risk parametreleri (SL/TP) → gerçek RR'a göre ayar
+          5. Sabırlı mod (bekleme süresi) → düşük güven WR'a göre
+          6. Kayıp analizi → derin öğrenme (neden kaybettik?)
+          7. HTF Bias doğruluk takibi → bilgilendirme
+          8. Entry Mode performansı → bilgilendirme
+        """
         logger.info("🔄 Optimizasyon döngüsü başlatılıyor...")
 
         stats = get_performance_summary()
@@ -58,22 +84,30 @@ class SelfOptimizer:
         if wr_change:
             changes.append(wr_change)
 
-        # 2. Bileşen bazlı ağırlık ayarlama
+        # 2. Bileşen bazlı ağırlık ayarlama (ICT parametreleri)
         comp_changes = self._optimize_component_weights(stats)
         changes.extend(comp_changes)
 
-        # 3. Risk yönetimi parametreleri
+        # 3. ★ Confluence Score ↔ Kârlılık korelasyonu
+        conf_changes = self._optimize_confluence_threshold(stats)
+        changes.extend(conf_changes)
+
+        # 4. Risk yönetimi parametreleri
         risk_changes = self._optimize_risk_params(stats)
         changes.extend(risk_changes)
 
-        # 4. Sabırlı mod ayarları
+        # 5. Sabırlı mod ayarları
         patience_change = self._optimize_patience(stats)
         if patience_change:
             changes.append(patience_change)
 
-        # 5. Kayıp analizi → derin öğrenme (neden kaybettik?)
+        # 6. Kayıp analizi → derin öğrenme (neden kaybettik?)
         loss_changes = self._learn_from_losses()
         changes.extend(loss_changes)
+
+        # 7-8. Bilgilendirme analizleri (parametre değiştirmez, log tutar)
+        self._log_htf_bias_accuracy()
+        self._log_entry_mode_performance()
 
         if changes:
             logger.info(f"✅ Optimizasyon tamamlandı: {len(changes)} parametre güncellendi")
@@ -133,9 +167,15 @@ class SelfOptimizer:
 
     def _optimize_component_weights(self, stats):
         """
-        Bileşen bazlı performans analizi:
-        - Başarılı bileşenlerin ağırlığını artır (dolaylı olarak)
-        - Başarısız bileşenlerin etkisini azalt
+        ICT bileşen bazlı performans analizi:
+        - Başarılı bileşenlerin parametrelerini hafif gevşet (daha fazla yakalansın)
+        - Başarısız bileşenlerin parametrelerini sıkılaştır (daha seçici ol)
+
+        Optimize edilen ICT parametreleri:
+          ORDER_BLOCK   → ob_body_ratio_min   (aralık: 0.3 - 0.7)
+          FVG           → fvg_min_size_pct    (aralık: 0.001 - 0.005)
+          LIQUIDITY_SWEEP → liquidity_equal_tolerance (aralık: 0.0005 - 0.003)
+          DISPLACEMENT  → displacement_min_body_ratio (aralık: 0.5 - 0.85)
         """
         changes = []
         comp_perf = stats.get("component_performance", {})
@@ -143,15 +183,27 @@ class SelfOptimizer:
         if not comp_perf:
             return changes
 
-        # Her bileşen için confluence score eşiklerini ayarla
+        # ICT bileşen → parametre eşleştirmesi + güvenli aralıklar
         param_mapping = {
-            "ORDER_BLOCK": "ob_body_ratio_min",
-            "FVG": "fvg_min_size_pct",
-            "LIQUIDITY_SWEEP": "liquidity_equal_tolerance",
-            "DISPLACEMENT": "displacement_min_body_ratio"
+            "ORDER_BLOCK": {
+                "param": "ob_body_ratio_min",
+                "min_val": 0.3, "max_val": 0.7
+            },
+            "FVG": {
+                "param": "fvg_min_size_pct",
+                "min_val": 0.0005, "max_val": 0.005
+            },
+            "LIQUIDITY_SWEEP": {
+                "param": "liquidity_equal_tolerance",
+                "min_val": 0.0005, "max_val": 0.003
+            },
+            "DISPLACEMENT": {
+                "param": "displacement_min_body_ratio",
+                "min_val": 0.5, "max_val": 0.85
+            }
         }
 
-        for comp_name, param_name in param_mapping.items():
+        for comp_name, cfg in param_mapping.items():
             if comp_name not in comp_perf:
                 continue
 
@@ -159,26 +211,27 @@ class SelfOptimizer:
             if comp["total"] < 5:  # Yeterli veri yok
                 continue
 
+            param_name = cfg["param"]
             win_rate = comp["win_rate"] / 100
             current_val = get_bot_param(param_name, ICT_PARAMS[param_name])
             new_val = current_val
 
             if win_rate < 0.4:
-                # Bu bileşen kötü performans gösteriyor - daha seçici ol
+                # Kötü performans → daha seçici ol (parametreyi artır)
                 adjustment = current_val * self.learning_rate
-                new_val = current_val + adjustment
+                new_val = min(cfg["max_val"], current_val + adjustment)
                 reason = f"{comp_name} düşük WR ({comp['win_rate']}%), daha seçici"
 
             elif win_rate > 0.75:
-                # Çok iyi performans - biraz gevşet
+                # Çok iyi performans → biraz gevşet (daha fazla fırsat)
                 adjustment = current_val * self.learning_rate * 0.5
-                new_val = max(current_val * 0.5, current_val - adjustment)
+                new_val = max(cfg["min_val"], current_val - adjustment)
                 reason = f"{comp_name} yüksek WR ({comp['win_rate']}%), biraz gevşetiliyor"
 
             else:
                 continue
 
-            # Max değişim sınırı
+            # Max değişim sınırı (%15)
             max_change_abs = current_val * self.max_change
             if abs(new_val - current_val) > max_change_abs:
                 new_val = current_val + (max_change_abs if new_val > current_val else -max_change_abs)
@@ -201,6 +254,71 @@ class SelfOptimizer:
             })
 
             logger.info(f"📊 {param_name}: {current_val} -> {new_val} ({reason})")
+
+        return changes
+
+    def _optimize_confluence_threshold(self, stats):
+        """
+        ★ Confluence Score ↔ Kârlılık Korelasyon Analizi
+
+        Veritabanındaki tamamlanmış işlemlere bakarak:
+        - "Score 80+ olan işlemler Score 60-70'e göre ne kadar daha kârlı?"
+        - Optimal minimum confluence score'u otomatik tespit et
+        - min_confluence_score parametresini buna göre kalibre et
+
+        Bu, botun "Hangi skor düzeyinde işlem açmalıyım?" sorusuna
+        veri odaklı cevap vermesini sağlar.
+        """
+        changes = []
+        analysis = get_confluence_profitability_analysis()
+
+        if not analysis["buckets"]:
+            return changes
+
+        optimal = analysis["optimal_min_score"]
+        if optimal is None:
+            return changes
+
+        current_min = get_bot_param("min_confluence_score", ICT_PARAMS["min_confluence_score"])
+
+        # Optimal → current'tan farklıysa ve makul aralıkta ise ayarla
+        # Aralık sınırı: 50-85
+        target = max(50, min(85, optimal))
+
+        # Küçük adımlarla yaklaş (agresif değişiklik yok)
+        if target > current_min + 2:
+            new_val = min(target, current_min + self.learning_rate * 20)
+            new_val = round(new_val, 1)
+            reason = (f"Confluence analizi: skor {target}+ bölgesi daha kârlı — "
+                      f"eşik {current_min} → {new_val}")
+        elif target < current_min - 2:
+            new_val = max(target, current_min - self.learning_rate * 15)
+            new_val = round(new_val, 1)
+            reason = (f"Confluence analizi: düşük eşik yeterli — "
+                      f"eşik {current_min} → {new_val}")
+        else:
+            return changes
+
+        if abs(new_val - current_min) < 0.5:
+            return changes
+
+        save_bot_param("min_confluence_score", new_val, ICT_PARAMS["min_confluence_score"])
+        add_optimization_log(
+            "min_confluence_score", current_min, new_val, reason,
+            stats["win_rate"], stats["win_rate"], stats["total_trades"]
+        )
+        changes.append({
+            "param": "min_confluence_score",
+            "old": current_min,
+            "new": new_val,
+            "reason": reason
+        })
+        logger.info(f"🎯 Confluence kalibrasyonu: {current_min} → {new_val}")
+
+        # Bucket detaylarını logla
+        for label, b in analysis["buckets"].items():
+            logger.info(f"  📈 Score {label}: {b['total']} işlem, "
+                        f"WR={b['win_rate']}%, avgPnL={b['avg_pnl']}%")
 
         return changes
 
@@ -317,10 +435,13 @@ class SelfOptimizer:
         return None
 
     def get_optimization_summary(self):
-        """Optimizasyon özetini döndür"""
+        """Optimizasyon özetini döndür — tüm yeni analizler dahil."""
         stats = get_performance_summary()
         all_params = get_all_bot_params()
         loss_info = get_loss_analysis(30)
+        confluence_analysis = get_confluence_profitability_analysis()
+        entry_mode_perf = get_entry_mode_performance()
+        htf_accuracy = get_htf_bias_accuracy()
 
         # Varsayılandan değişen parametreleri bul
         changed_params = {}
@@ -342,8 +463,46 @@ class SelfOptimizer:
             "changed_params": changed_params,
             "performance": stats,
             "loss_lessons": loss_info.get("lesson_summary", []),
+            "confluence_analysis": confluence_analysis,
+            "entry_mode_performance": entry_mode_perf,
+            "htf_bias_accuracy": htf_accuracy,
             "last_check": datetime.now().isoformat()
         }
+
+    def _log_htf_bias_accuracy(self):
+        """
+        HTF Bias doğruluk takibi — 4H yön tayini ne kadar isabetli?
+        Sadece loglar, parametre değiştirmez (bilgilendirme amaçlı).
+        """
+        accuracy = get_htf_bias_accuracy()
+        if not accuracy:
+            return
+
+        for bias, data in accuracy.items():
+            logger.info(
+                f"📊 HTF Bias '{bias}': {data['total']} işlem, "
+                f"WR={data['win_rate']}%"
+            )
+            if data["total"] >= 5 and data["win_rate"] < 40:
+                logger.warning(
+                    f"⚠️ HTF Bias '{bias}' düşük doğruluk ({data['win_rate']}%) — "
+                    f"bu bias ile dikkatli ol"
+                )
+
+    def _log_entry_mode_performance(self):
+        """
+        LIMIT vs MARKET giriş performansı — hangisi daha kârlı?
+        Sadece loglar, parametre değiştirmez (bilgilendirme amaçlı).
+        """
+        perf = get_entry_mode_performance()
+        if not perf:
+            return
+
+        for mode, data in perf.items():
+            logger.info(
+                f"📊 Entry Mode '{mode}': {data['total']} işlem, "
+                f"WR={data['win_rate']}%, avgPnL={data['avg_pnl']}%"
+            )
 
 
     def _learn_from_losses(self):
@@ -399,15 +558,21 @@ class SelfOptimizer:
                                "new": new_conf, "reason": reason})
                 logger.info(f"🧠 DERS: {reason}")
 
-        # 3. HTF onaysız kayıplar çoksa → HTF uyumsuzluk cezasını artır (dolaylı: eşik)
+        # 3. HTF onaysız kayıplar çoksa → uyar
         htf_missing = missing.get("HTF_CONFIRMATION", 0)
         if total_losses > 0 and htf_missing / total_losses > 0.65:
             reason = (f"Kayıpların %{htf_missing/total_losses*100:.0f}'inde HTF onayı yoktu — "
                      f"HTF uyumu kritik")
             logger.info(f"🧠 NOT: {reason}")
-            # Bu bilgiyi lesson olarak sakla, agresif parametre değişikliği yapma
 
-        # 4. Ortalama kayıp büyükse → SL mesafesini kontrol et
+        # 4. Sweep olmadan girilen kayıplar çoksa → uyar
+        sweep_missing = missing.get("LIQUIDITY_SWEEP", 0)
+        if total_losses > 0 and sweep_missing / total_losses > 0.5:
+            reason = (f"Kayıpların %{sweep_missing/total_losses*100:.0f}'inde Sweep yoktu — "
+                     f"Sweep gate'i kritik önemde")
+            logger.info(f"🧠 NOT: {reason}")
+
+        # 5. Ortalama kayıp büyükse → SL mesafesini kontrol et
         if loss_info["avg_loss_pct"] > 2.0:
             current_sl = get_bot_param("default_sl_pct", ICT_PARAMS["default_sl_pct"])
             # SL çok geniş olabilir, daralt

@@ -84,7 +84,7 @@ def init_db():
     if "expire_reason" not in existing_cols:
         conn.execute("ALTER TABLE watchlist ADD COLUMN expire_reason TEXT")
 
-    # Signals tablosuna yeni kolonlar (v2.0 limit emir desteği)
+    # Signals tablosuna yeni kolonlar (v2.0 Smart Money upgrade)
     signal_cols = {
         row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()
     }
@@ -92,6 +92,8 @@ def init_db():
         conn.execute("ALTER TABLE signals ADD COLUMN entry_mode TEXT DEFAULT 'MARKET'")
     if "htf_bias" not in signal_cols:
         conn.execute("ALTER TABLE signals ADD COLUMN htf_bias TEXT")
+    if "rr_ratio" not in signal_cols:
+        conn.execute("ALTER TABLE signals ADD COLUMN rr_ratio REAL")
 
     # Optimizasyon logları
     cursor.execute("""
@@ -141,15 +143,19 @@ def init_db():
 # =================== SİNYAL İŞLEMLERİ ===================
 
 def add_signal(symbol, direction, entry_price, stop_loss, take_profit,
-               confidence, confluence_score, components, timeframe, status="WAITING", notes=""):
+               confidence, confluence_score, components, timeframe, status="WAITING",
+               notes="", entry_mode="MARKET", htf_bias=None, rr_ratio=None):
+    """Yeni sinyal kaydet — tüm ICT meta verileri dahil."""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO signals (symbol, direction, entry_price, stop_loss, take_profit,
-                           confidence, confluence_score, components, timeframe, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           confidence, confluence_score, components, timeframe, status,
+                           notes, entry_mode, htf_bias, rr_ratio)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (symbol, direction, entry_price, stop_loss, take_profit,
-          confidence, confluence_score, json.dumps(components), timeframe, status, notes))
+          confidence, confluence_score, json.dumps(components), timeframe, status,
+          notes, entry_mode, htf_bias, rr_ratio))
     conn.commit()
     return cursor.lastrowid
 
@@ -450,6 +456,94 @@ def get_component_performance():
     return comp_stats
 
 
+def get_confluence_profitability_analysis():
+    """
+    Confluence Score ile kârlılık arasındaki korelasyonu analiz et.
+    Optimizer'ın "Hangi skor aralığı daha kârlı?" sorusuna cevap verir.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT confluence_score, pnl_pct, status FROM signals
+        WHERE status IN ('WON','LOST') AND confluence_score IS NOT NULL
+    """).fetchall()
+
+    if not rows:
+        return {"buckets": {}, "optimal_min_score": None}
+
+    # Skor aralıklarına böl: 40-50, 50-60, 60-70, 70-80, 80-90, 90-100
+    buckets = {}
+    for lo in range(40, 100, 10):
+        hi = lo + 10
+        label = f"{lo}-{hi}"
+        bucket_rows = [r for r in rows if lo <= (r['confluence_score'] or 0) < hi]
+        if bucket_rows:
+            wins = sum(1 for r in bucket_rows if r['status'] == 'WON')
+            total = len(bucket_rows)
+            avg_pnl = sum(r['pnl_pct'] or 0 for r in bucket_rows) / total
+            buckets[label] = {
+                "total": total, "wins": wins,
+                "win_rate": round(wins / total * 100, 1),
+                "avg_pnl": round(avg_pnl, 3)
+            }
+
+    # En kârlı minimum skoru bul
+    optimal = None
+    best_combined = -999
+    for label, b in buckets.items():
+        combined = b["win_rate"] * 0.6 + b["avg_pnl"] * 40  # Ağırlıklı skor
+        if combined > best_combined and b["total"] >= 3:
+            best_combined = combined
+            optimal = int(label.split("-")[0])
+
+    return {"buckets": buckets, "optimal_min_score": optimal}
+
+
+def get_entry_mode_performance():
+    """
+    LIMIT vs MARKET giriş modlarının performans karşılaştırması.
+    Optimizer hangi modun daha kârlı olduğunu öğrenir.
+    """
+    conn = get_db()
+    result = {}
+    for mode in ("LIMIT", "MARKET"):
+        rows = conn.execute("""
+            SELECT status, pnl_pct FROM signals
+            WHERE status IN ('WON','LOST') AND entry_mode = ?
+        """, (mode,)).fetchall()
+        if rows:
+            wins = sum(1 for r in rows if r['status'] == 'WON')
+            total = len(rows)
+            avg_pnl = sum(r['pnl_pct'] or 0 for r in rows) / total
+            result[mode] = {
+                "total": total, "wins": wins,
+                "win_rate": round(wins / total * 100, 1),
+                "avg_pnl": round(avg_pnl, 3)
+            }
+    return result
+
+
+def get_htf_bias_accuracy():
+    """
+    HTF Bias doğruluk analizi — 4H yönü doğru çıkma oranı.
+    """
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT htf_bias, status, pnl_pct FROM signals
+        WHERE status IN ('WON','LOST') AND htf_bias IS NOT NULL
+    """).fetchall()
+    result = {}
+    for bias in ("BULLISH", "BEARISH", "WEAKENING_BULL", "WEAKENING_BEAR"):
+        bias_rows = [r for r in rows if r['htf_bias'] == bias]
+        if bias_rows:
+            wins = sum(1 for r in bias_rows if r['status'] == 'WON')
+            total = len(bias_rows)
+            result[bias] = {
+                "total": total, "wins": wins,
+                "win_rate": round(wins / total * 100, 1)
+            }
+    return result
+
+
 def get_loss_analysis(limit=30):
     """
     Kaybeden işlemlerin detaylı analizini çıkar.
@@ -458,7 +552,7 @@ def get_loss_analysis(limit=30):
     conn = get_db()
     rows = conn.execute("""
         SELECT symbol, direction, components, notes, pnl_pct, confidence,
-               confluence_score, created_at, close_time
+               confluence_score, created_at, close_time, entry_mode, htf_bias, rr_ratio
         FROM signals
         WHERE status = 'LOST'
         ORDER BY close_time DESC LIMIT ?
