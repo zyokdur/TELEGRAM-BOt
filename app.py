@@ -2,6 +2,9 @@
 # ICT Trading Bot - Ana Flask Uygulaması
 # =====================================================
 
+import eventlet
+eventlet.monkey_patch()
+
 import logging
 import time
 import json
