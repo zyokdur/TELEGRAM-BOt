@@ -12,7 +12,7 @@ import numpy as np
 import time
 import logging
 from datetime import datetime, timedelta
-from config import OKX_API_V5, MIN_VOLUME_USDT, MAX_COINS_TO_SCAN, VOLUME_REFRESH_INTERVAL
+from config import OKX_API_V5, MIN_VOLUME_USDT, MAX_COINS_TO_SCAN, VOLUME_REFRESH_INTERVAL, INST_TYPE
 
 logger = logging.getLogger("ICT-Bot.DataFetcher")
 
@@ -114,8 +114,10 @@ class OKXDataFetcher:
 
         return None
 
-    def get_all_tickers(self, inst_type="SPOT"):
+    def get_all_tickers(self, inst_type=None):
         """Tüm USDT çiftlerinin gerçek zamanlı fiyat ve hacim verilerini çek"""
+        if inst_type is None:
+            inst_type = INST_TYPE
         cache_key = f"all_tickers_{inst_type}"
         cached = self._get_cached(cache_key, ttl=10)
         if cached is not None:
@@ -124,10 +126,13 @@ class OKXDataFetcher:
         params = {"instType": inst_type}
         data = self._make_request("/market/tickers", params)
 
+        # SWAP suffix: BTC-USDT-SWAP, SPOT: BTC-USDT
+        suffix = "-USDT-SWAP" if inst_type == "SWAP" else "-USDT"
+
         tickers = {}
         for item in data:
             symbol = item.get("instId", "")
-            if not symbol.endswith("-USDT"):
+            if not symbol.endswith(suffix):
                 continue
 
             last_price = float(item.get("last", 0))
@@ -165,9 +170,9 @@ class OKXDataFetcher:
         if not force_refresh and self._active_coins and (now - self._coins_last_refresh) < VOLUME_REFRESH_INTERVAL:
             return self._active_coins
 
-        logger.info(f"📊 OKX'ten yüksek hacimli coinler çekiliyor (min ${MIN_VOLUME_USDT:,.0f})...")
+        logger.info(f"📊 OKX'ten yüksek hacimli {INST_TYPE} coinler çekiliyor (min ${MIN_VOLUME_USDT:,.0f})...")
 
-        tickers = self.get_all_tickers("SPOT")
+        tickers = self.get_all_tickers(INST_TYPE)
         if not tickers:
             logger.warning("OKX ticker verisi alınamadı!")
             return self._active_coins if self._active_coins else []

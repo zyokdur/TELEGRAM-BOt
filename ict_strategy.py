@@ -67,13 +67,15 @@ class ICTStrategy:
 
     def get_session_info(self):
         """
-        ICT Killzone (oturum) bilgisi.
-        Kurumsal aktivite belirli UTC saatlerinde yoğunlaşır:
-          London Killzone  07-10 UTC  (yüksek volatilite, ana hareketler)
-          NY Killzone      12-15 UTC  (yüksek volatilite, trend devamı)
-          London Close     15-17 UTC  (geri çekilmeler)
-          Asian Session    00-07 UTC  (düşük volatilite, likidite oluşumu)
-          Off-Hours        17-00 UTC  (düşük volatilite)
+        Kripto-optimize oturum bilgisi.
+        Kripto 7/24 işlem görür — forex killzone'ları aynen geçerli ama
+        Asya oturumu kripto için ÇOK AKTİF bir dönemdir (ceza yok).
+          London Killzone  07-10 UTC  (kurumsal, yüksek volatilite)
+          NY Killzone      12-15 UTC  (kurumsal, trend devamı)
+          London-NY Geçiş  10-12 UTC  (overlap hazırlık)
+          London Kapanış   15-17 UTC  (geri çekilmeler)
+          Asya Oturumu     00-07 UTC  (kripto aktif, likidite oluşumu)
+          Geçiş Saatleri   17-00 UTC  (daha az momentum, hâlâ aktif)
         """
         now = datetime.now(timezone.utc)
         hour = now.hour
@@ -83,23 +85,58 @@ class ICTStrategy:
         elif 12 <= hour < 15:
             return {"session": "NY_KILLZONE", "quality": 1.0, "label": "NY Killzone"}
         elif 10 <= hour < 12:
-            return {"session": "LONDON_NY_OVERLAP_PREP", "quality": 0.8, "label": "London-NY Geçiş"}
+            return {"session": "LONDON_NY_OVERLAP_PREP", "quality": 0.9, "label": "London-NY Geçiş"}
         elif 15 <= hour < 17:
-            return {"session": "LONDON_CLOSE", "quality": 0.7, "label": "London Kapanış"}
+            return {"session": "LONDON_CLOSE", "quality": 0.8, "label": "London Kapanış"}
         elif 0 <= hour < 7:
-            return {"session": "ASIAN", "quality": 0.5, "label": "Asya Oturumu"}
+            return {"session": "ASIAN", "quality": 0.85, "label": "Asya Oturumu (Kripto Aktif)"}
         else:
-            return {"session": "OFF_HOURS", "quality": 0.3, "label": "Düşük Aktivite"}
+            return {"session": "OFF_HOURS", "quality": 0.7, "label": "Geçiş Saatleri"}
 
     # =================================================================
     #  BÖLÜM 2 — YATAY PİYASA TESPİTİ
     # =================================================================
 
+    def _calc_atr(self, df, period=14):
+        """
+        ATR (Average True Range) hesapla.
+        Volatilite normalizasyonu için tüm modüllerde kullanılır.
+        """
+        if len(df) < period + 1:
+            # Yeterli veri yoksa basit range ortalaması
+            ranges = (df["high"] - df["low"]).values
+            return float(np.mean(ranges)) if len(ranges) > 0 else 0.0
+
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+
+        tr_list = []
+        for i in range(1, len(df)):
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1])
+            )
+            tr_list.append(tr)
+
+        if len(tr_list) < period:
+            return float(np.mean(tr_list)) if tr_list else 0.0
+
+        # EMA-based ATR
+        atr = np.mean(tr_list[:period])
+        multiplier = 2.0 / (period + 1)
+        for tr in tr_list[period:]:
+            atr = (tr - atr) * multiplier + atr
+
+        return float(atr)
+
     def detect_ranging_market(self, df, lookback=20):
         """
-        Yatay (ranging) piyasayı tespit et.
-        Range-bound piyasalarda ICT sinyalleri düşük kalitelidir.
-        Efficiency ratio + range genişliği kontrolü uygular.
+        ATR-adaptif yatay piyasa tespiti.
+        Sabit eşik yerine ATR tabanlı dinamik threshold kullanır.
+        Akümülasyon sonrası trend başlangıçlarını kaçırmamak için
+        slope analizi de eklendi.
         Returns: True = ranging → sinyal üretme.
         """
         if len(df) < lookback:
@@ -116,13 +153,37 @@ class ICTStrategy:
         total_move = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
         efficiency = net_move / total_move if total_move > 0 else 0
 
-        # Toplam high-low range genişliği
-        total_range_pct = (np.max(highs) - np.min(lows)) / avg_price if avg_price > 0 else 0
+        # ATR tabanlı dinamik range threshold
+        atr = self._calc_atr(df)
+        atr_pct = atr / avg_price if avg_price > 0 else 0.01
+        # Range genişliği ATR'nin kaç katı? < 1.5 ATR = çok dar = ranging
+        total_range = np.max(highs) - np.min(lows)
+        range_atr_ratio = total_range / atr if atr > 0 else 999
 
-        is_ranging = (efficiency < 0.15 and total_range_pct < 0.02) or efficiency < 0.10
+        # Slope analizi: son kapanışlara lineer regresyon
+        # Eğim > 0 = trend başlıyor olabilir (akümülasyon çıkışı)
+        x = np.arange(len(closes))
+        if len(closes) >= 5:
+            slope = np.polyfit(x, closes, 1)[0]
+            slope_pct = abs(slope * lookback) / avg_price if avg_price > 0 else 0
+        else:
+            slope_pct = 0
+
+        # Adaptif ranging tespiti:
+        # 1) Efficiency çok düşük + range dar (ATR tabanlı) = ranging
+        # 2) AMA slope güçlüyse (>0.8%) = trend başlıyor, ranging değil
+        if slope_pct >= 0.008:
+            # Güçlü eğim = akümülasyon çıkışı olabilir → ranging değil
+            return False
+
+        is_ranging = (
+            (efficiency < 0.08 and range_atr_ratio < 2.0) or
+            (efficiency < 0.04 and range_atr_ratio < 3.0)
+        )
 
         if is_ranging:
-            logger.debug(f"  📊 Ranging market: eff={efficiency:.3f}, range={total_range_pct:.4f}")
+            logger.debug(f"  📊 Ranging market: eff={efficiency:.3f}, "
+                         f"range/ATR={range_atr_ratio:.1f}, slope={slope_pct:.4f}")
 
         return is_ranging
 
@@ -132,10 +193,10 @@ class ICTStrategy:
 
     def find_swing_points(self, df, lookback=None):
         """
-        Swing High ve Swing Low noktalarını tespit et.
-        Swing High: lookback kadar sağ ve soldaki mumlardan yüksek olan tepe.
-        Swing Low:  lookback kadar sağ ve soldaki mumlardan düşük olan dip.
-        Bunlar piyasanın iskelet yapısını oluşturur.
+        Hibrit Swing Point tespiti:
+        1) Ana pivotlar: lookback (5) mumluk standart swing tespiti
+        2) Internal fractals: 3 mumluk hızlı yapı tespiti (repainting riski azaltır)
+        Internal fractal'lar MSS ve displacement tespitinde lag'ı önler.
         """
         if lookback is None:
             lookback = int(self.params["swing_lookback"])
@@ -145,27 +206,61 @@ class ICTStrategy:
         n = len(df)
         swing_highs = []
         swing_lows = []
+        seen_highs = set()
+        seen_lows = set()
 
+        # 1) Ana pivotlar (standart lookback)
         for i in range(lookback, n - lookback):
-            # Swing High: merkez mum sağ ve soldakilerin hepsinden yüksek mi?
             is_sh = all(highs[i] > highs[i - j] and highs[i] > highs[i + j]
                         for j in range(1, lookback + 1))
             if is_sh:
                 swing_highs.append({
-                    "index": i,
-                    "price": highs[i],
-                    "timestamp": df["timestamp"].iloc[i]
+                    "index": i, "price": highs[i],
+                    "timestamp": df["timestamp"].iloc[i],
+                    "fractal_type": "MAJOR"
                 })
+                seen_highs.add(i)
 
-            # Swing Low: merkez mum sağ ve soldakilerin hepsinden düşük mü?
             is_sl = all(lows[i] < lows[i - j] and lows[i] < lows[i + j]
                         for j in range(1, lookback + 1))
             if is_sl:
                 swing_lows.append({
-                    "index": i,
-                    "price": lows[i],
-                    "timestamp": df["timestamp"].iloc[i]
+                    "index": i, "price": lows[i],
+                    "timestamp": df["timestamp"].iloc[i],
+                    "fractal_type": "MAJOR"
                 })
+                seen_lows.add(i)
+
+        # 2) Internal fractals (3 mumluk) — sadece son 15 mumda
+        #    Bu, displacement/MSS tespitinde lag'ı önler
+        internal_lookback = 2  # 2 mum sağ-sol (toplam 5, ama daha hızlı onaylanır)
+        start_idx = max(internal_lookback, n - 15)
+        for i in range(start_idx, n - internal_lookback):
+            if i in seen_highs:
+                continue
+            is_sh = all(highs[i] > highs[i - j] and highs[i] > highs[i + j]
+                        for j in range(1, internal_lookback + 1))
+            if is_sh:
+                swing_highs.append({
+                    "index": i, "price": highs[i],
+                    "timestamp": df["timestamp"].iloc[i],
+                    "fractal_type": "INTERNAL"
+                })
+
+            if i in seen_lows:
+                continue
+            is_sl = all(lows[i] < lows[i - j] and lows[i] < lows[i + j]
+                        for j in range(1, internal_lookback + 1))
+            if is_sl:
+                swing_lows.append({
+                    "index": i, "price": lows[i],
+                    "timestamp": df["timestamp"].iloc[i],
+                    "fractal_type": "INTERNAL"
+                })
+
+        # Index sırasına göre sırala
+        swing_highs.sort(key=lambda x: x["index"])
+        swing_lows.sort(key=lambda x: x["index"])
 
         return swing_highs, swing_lows
 
@@ -514,14 +609,27 @@ class ICTStrategy:
 
     def detect_displacement(self, df, lookback=10):
         """
-        Displacement: Kurumsal aktivitenin izini gösteren güçlü momentum mumları.
-        Büyük gövdeli, küçük fitilli, tek yönlü hareket.
-        ICT'de "displacement" olmadan giriş yapılmaz — kurumsal onay eksik demektir.
+        ATR-Normalized Displacement tespiti.
+        Sabit %0.5 threshold yerine 1.5 × ATR(14) kullanır.
+        Bu sayede:
+        - BTC gibi volatil coinlerde küçük mumlar yanlışlıkla displacement sayılmaz
+        - Düşük volatiliteli coinlerde gerçek displacement kaçırılmaz
+        Hacim analizi: Yüksek hacimli displacement daha güvenilirdir.
         """
         displacements = []
         min_body_ratio = self.params["displacement_min_body_ratio"]
-        min_size_pct = self.params["displacement_min_size_pct"]
         n = len(df)
+
+        # ATR tabanlı dinamik displacement threshold
+        atr = self._calc_atr(df, period=14)
+        atr_multiplier = 1.5  # Mum gövdesi en az 1.5 × ATR olmalı
+
+        # Fallback: ATR hesaplanamadıysa sabit threshold kullan
+        min_size_pct = self.params["displacement_min_size_pct"]
+
+        # Ortalama hacim
+        has_volume = "volume" in df.columns and df["volume"].sum() > 0
+        avg_volume = df["volume"].rolling(20).mean().iloc[-1] if has_volume else 0
 
         for i in range(max(0, n - lookback), n):
             candle = df.iloc[i]
@@ -531,15 +639,31 @@ class ICTStrategy:
             if total_range <= 0 or mid_price <= 0:
                 continue
             body_ratio = body / total_range
-            size_pct = body / mid_price
 
-            if body_ratio >= min_body_ratio and size_pct >= min_size_pct:
+            # ★ ATR-Normalized: gövde >= 1.5 × ATR VEYA sabit threshold
+            is_displacement = body_ratio >= min_body_ratio and (
+                (atr > 0 and body >= atr * atr_multiplier) or
+                (body / mid_price >= min_size_pct)
+            )
+
+            if is_displacement:
                 direction = "BULLISH" if candle["close"] > candle["open"] else "BEARISH"
+
+                # Hacim analizi
+                vol_ratio = 1.0
+                if has_volume and avg_volume > 0:
+                    vol_ratio = round(candle["volume"] / avg_volume, 2)
+
+                # ATR katı bilgisi (debugging için)
+                atr_multiple = round(body / atr, 2) if atr > 0 else 0
+
                 displacements.append({
                     "type": f"{direction}_DISPLACEMENT", "index": i,
                     "body_ratio": round(body_ratio, 3),
-                    "size_pct": round(size_pct * 100, 3),
-                    "direction": direction, "timestamp": candle["timestamp"]
+                    "size_pct": round((body / mid_price) * 100, 3),
+                    "atr_multiple": atr_multiple,
+                    "direction": direction, "timestamp": candle["timestamp"],
+                    "volume_ratio": vol_ratio
                 })
 
         return displacements
@@ -581,6 +705,100 @@ class ICTStrategy:
                 (current_price - low_price) / (high_price - low_price) * 100, 1
             ) if high_price != low_price else 50
         }
+
+    # =================================================================
+    #  BÖLÜM 10.5 — MTF (1H) DOĞRULAMA KATMANI
+    # =================================================================
+
+    def _analyze_mtf_confirmation(self, multi_tf_data, ltf_structure, direction):
+        """
+        ★ MTF (1H) Doğrulama Katmanı.
+
+        4H bias ile 15m entry arasında köprü görevi görür.
+        Kontroller:
+          1. 1H trend yönü, 15m (LTF) ile aynı mı?
+          2. 1H'deki aktif Order Block'lar LTF entry bölgesiyle çakışıyor mu?
+          3. 1H'deki doldurulmamış FVG'ler LTF entry bölgesinde mi?
+
+        Sonuç:
+          - bias_aligned=True  → 1H onaylıyor (+10 puan)
+          - ob_confluence=True → 1H OB çakışması (+5 bonus)
+          - fvg_confluence=True → 1H FVG çakışması (+3 bonus)
+          - bias_conflict=True → 1H karşı yönde (-8 ceza)
+        """
+        if not multi_tf_data or "1H" not in multi_tf_data:
+            return None
+
+        mtf_df = multi_tf_data["1H"]
+        if mtf_df is None or mtf_df.empty or len(mtf_df) < 20:
+            return None
+
+        # 1H yapı analizi
+        mtf_structure = self.detect_market_structure(mtf_df)
+        mtf_trend = mtf_structure["trend"]
+
+        # Bias uyumu
+        bias_aligned = False
+        bias_conflict = False
+
+        if direction == "LONG":
+            if mtf_trend in ["BULLISH", "WEAKENING_BEAR"]:
+                bias_aligned = True
+            elif mtf_trend == "BEARISH":
+                bias_conflict = True
+        elif direction == "SHORT":
+            if mtf_trend in ["BEARISH", "WEAKENING_BULL"]:
+                bias_aligned = True
+            elif mtf_trend == "BULLISH":
+                bias_conflict = True
+
+        # 1H Order Block çakışma kontrolü
+        ob_confluence = False
+        active_obs, all_obs = self.find_order_blocks(mtf_df, mtf_structure)
+        current_price = mtf_df["close"].iloc[-1]
+
+        for ob in active_obs:
+            if direction == "LONG" and ob["type"] == "BULLISH_OB":
+                # Fiyat 1H bullish OB bölgesinde veya yakınında mı?
+                if ob["low"] * 0.995 <= current_price <= ob["high"] * 1.01:
+                    ob_confluence = True
+                    break
+            elif direction == "SHORT" and ob["type"] == "BEARISH_OB":
+                if ob["low"] * 0.99 <= current_price <= ob["high"] * 1.005:
+                    ob_confluence = True
+                    break
+
+        # 1H FVG çakışma kontrolü
+        fvg_confluence = False
+        mtf_fvgs = self.find_fvg(mtf_df)
+
+        for fvg in mtf_fvgs:
+            if direction == "LONG" and fvg["type"] == "BULLISH_FVG":
+                if fvg["low"] * 0.998 <= current_price <= fvg["high"] * 1.005:
+                    fvg_confluence = True
+                    break
+            elif direction == "SHORT" and fvg["type"] == "BEARISH_FVG":
+                if fvg["low"] * 0.995 <= current_price <= fvg["high"] * 1.002:
+                    fvg_confluence = True
+                    break
+
+        result = {
+            "mtf_trend": mtf_trend,
+            "bias_aligned": bias_aligned,
+            "bias_conflict": bias_conflict,
+            "ob_confluence": ob_confluence,
+            "fvg_confluence": fvg_confluence,
+            "structure": mtf_structure,
+            "active_obs": len(active_obs),
+            "active_fvgs": len(mtf_fvgs),
+        }
+
+        if bias_aligned:
+            logger.debug(f"  📊 MTF (1H) ONAYLADI: trend={mtf_trend}, OB={ob_confluence}, FVG={fvg_confluence}")
+        elif bias_conflict:
+            logger.debug(f"  ⚠️ MTF (1H) UYUMSUZ: trend={mtf_trend} vs direction={direction}")
+
+        return result
 
     # =================================================================
     #  BÖLÜM 11 — GATE 1: HTF BIAS (4 Saatlik Yapı Analizi)
@@ -629,7 +847,7 @@ class ICTStrategy:
     #  BÖLÜM 12 — GATE 2: LIQUIDITY SWEEP (Likidite Avı)
     # =================================================================
 
-    def _find_sweep_event(self, df, bias, lookback=30):
+    def _find_sweep_event(self, df, bias, lookback=20):
         """
         ★ GATE 2 — Likidite Avı (Stop Hunt) Tespiti.
 
@@ -642,11 +860,23 @@ class ICTStrategy:
         SHORT bias → Fiyat eski bir Swing High'ın ÜSTÜNE fitil atar ve
                       ALTINDA kapanır (stop hunt → smart money satış)
 
+        lookback=20 (15m'de ~5 saat): Daha eski sweep'ler "soğumuş" olur,
+        kurumsal aktiviteyle zamansal ilişkisi zayıflar.
+
         Returns: {"swept_level": float, "sweep_candle_idx": int, ...}
                  veya None (sweep yok)
         """
         swing_highs, swing_lows = self.find_swing_points(df)
+        liquidity_levels = self.find_liquidity_levels(df)
         n = len(df)
+
+        # Hacim verisi mevcut mu?
+        has_volume = "volume" in df.columns and df["volume"].sum() > 0
+        avg_volume = df["volume"].rolling(20).mean().iloc[-1] if has_volume else 0
+
+        # Session kalitesi (killzone sweep'leri daha değerli)
+        session = self.get_session_info()
+        session_quality = session.get("quality", 0.7)
 
         if bias == "LONG":
             # LONG → SSL (Sell-Side Liquidity) avı → eski swing low altına fitil
@@ -660,12 +890,19 @@ class ICTStrategy:
                     if candle["low"] < sw_price and candle["close"] > sw_price:
                         # Sweep çok eski olmamalı
                         if n - 1 - i <= lookback:
+                            # === SWEEP KALİTE SKORU ===
+                            sweep_quality = self._calc_sweep_quality(
+                                sw_price, candle, i, n, bias,
+                                liquidity_levels, has_volume, avg_volume,
+                                session_quality, df=df
+                            )
                             return {
                                 "swept_level": sw_price,
                                 "sweep_candle_idx": i,
                                 "sweep_wick": candle["low"],
                                 "sweep_type": "SSL_SWEEP",
-                                "swing_index": sw_idx
+                                "swing_index": sw_idx,
+                                "sweep_quality": sweep_quality
                             }
 
         elif bias == "SHORT":
@@ -678,15 +915,125 @@ class ICTStrategy:
                     # Wick sw_price üstüne çıkıp, close sw_price altında mı?
                     if candle["high"] > sw_price and candle["close"] < sw_price:
                         if n - 1 - i <= lookback:
+                            sweep_quality = self._calc_sweep_quality(
+                                sw_price, candle, i, n, bias,
+                                liquidity_levels, has_volume, avg_volume,
+                                session_quality, df=df
+                            )
                             return {
                                 "swept_level": sw_price,
                                 "sweep_candle_idx": i,
                                 "sweep_wick": candle["high"],
                                 "sweep_type": "BSL_SWEEP",
-                                "swing_index": sw_idx
+                                "swing_index": sw_idx,
+                                "sweep_quality": sweep_quality
                             }
 
         return None
+
+    def _calc_sweep_quality(self, swept_level, candle, candle_idx, n, bias,
+                            liquidity_levels, has_volume, avg_volume, session_quality,
+                            df=None):
+        """
+        Geliştirilmiş Sweep kalite skoru (0.0 - 2.5 arası çarpan).
+
+        Kaliteyi belirleyen faktörler:
+        1. Equal highs/lows sweep'i mi? (çok dokunuşlu seviye = daha güçlü)
+        2. Sweep sırasında hacim yüksek mi? (kurumsal onay)
+        3. Killzone sırasında mı? (kurumsal aktivite saatleri)
+        4. Sweep ne kadar taze? (yeni sweep > eski sweep)
+        5. ★ YENİ: Sweep öncesi compression (sıkışma) var mı?
+        6. ★ YENİ: Time-in-liquidity (fitil oranı kontrolü)
+        7. ★ YENİ: OB + liquidity alignment
+        """
+        quality = 1.0  # Baz kalite
+
+        # 1) Equal highs/lows seviyesi mi? (çok dokunuşlu = çok stop birikmiş)
+        tolerance = self.params.get("liquidity_equal_tolerance", 0.001)
+        for liq in liquidity_levels:
+            if abs(liq["price"] - swept_level) / swept_level <= tolerance * 2:
+                touches = liq.get("touches", 2)
+                if touches >= 3:
+                    quality += 0.4  # 3+ dokunuş = güçlü likidite havuzu
+                else:
+                    quality += 0.2  # 2 dokunuş = normal equal level
+                break
+
+        # 2) Hacim analizi: Sweep mumunda ortalama üstü hacim
+        if has_volume and avg_volume > 0:
+            sweep_vol = candle["volume"]
+            vol_ratio = sweep_vol / avg_volume
+            if vol_ratio >= 2.0:
+                quality += 0.3  # 2x hacim = güçlü kurumsal aktivite
+            elif vol_ratio >= 1.5:
+                quality += 0.15
+        else:
+            # Hacimsiz sweep = potansiyel fake → ceza
+            quality -= 0.15
+
+        # 3) Killzone sırasında mı?
+        if session_quality >= 1.0:
+            quality += 0.2  # London/NY killzone = en kaliteli sweep
+        elif session_quality >= 0.85:
+            quality += 0.1  # Asya aktif dönem
+
+        # 4) Tazelik: Son 5 mum içinde = taze, 10+ = soğumuş
+        age = n - 1 - candle_idx
+        if age <= 3:
+            quality += 0.1
+        elif age >= 15:
+            quality -= 0.2
+
+        # 5) ★ Sweep öncesi compression (sıkışma) kontrolü
+        #    Sweep öncesi 5+ mum dar range'de sıkışmışsa → birikmiş enerji
+        #    Bu gerçek kurumsal manipulation işaretidir
+        if df is not None and candle_idx >= 6:
+            pre_sweep = df.iloc[max(0, candle_idx - 6):candle_idx]
+            if len(pre_sweep) >= 4:
+                pre_ranges = (pre_sweep["high"] - pre_sweep["low"]).values
+                sweep_range = candle["high"] - candle["low"]
+                avg_pre_range = np.mean(pre_ranges)
+                if avg_pre_range > 0 and sweep_range > 0:
+                    # Sweep öncesi range ortalaması sweep mumunun %60'ından azsa = compression
+                    compression_ratio = avg_pre_range / sweep_range
+                    if compression_ratio < 0.6:
+                        quality += 0.25  # Compression sonrası sweep = güçlü
+
+        # 6) ★ Time-in-liquidity: Fitil oranı kontrolü
+        #    Gerçek sweep = uzun fitil + geri kapanış
+        #    Fake sweep = çok küçük fitil, anlamsız dokunma
+        body = abs(candle["close"] - candle["open"])
+        total_range = candle["high"] - candle["low"]
+        if total_range > 0:
+            if bias == "LONG":
+                # SSL sweep: alt fitil oranı
+                lower_wick = min(candle["open"], candle["close"]) - candle["low"]
+                wick_ratio = lower_wick / total_range
+            else:
+                # BSL sweep: üst fitil oranı
+                upper_wick = candle["high"] - max(candle["open"], candle["close"])
+                wick_ratio = upper_wick / total_range
+
+            if wick_ratio >= 0.4:
+                quality += 0.2  # Belirgin fitil = gerçek sweep
+            elif wick_ratio < 0.1:
+                quality -= 0.3  # Neredeyse fitilsiz = muhtemelen fake
+
+        # 7) ★ OB + liquidity alignment: Sweep seviyesinde OB var mı?
+        if df is not None:
+            structure = self.detect_market_structure(df)
+            active_obs, _ = self.find_order_blocks(df, structure)
+            for ob in active_obs:
+                if bias == "LONG" and ob["type"] == "BULLISH_OB":
+                    if ob["low"] <= swept_level <= ob["high"] * 1.005:
+                        quality += 0.2  # OB + sweep alignment
+                        break
+                elif bias == "SHORT" and ob["type"] == "BEARISH_OB":
+                    if ob["low"] * 0.995 <= swept_level <= ob["high"]:
+                        quality += 0.2  # OB + sweep alignment
+                        break
+
+        return round(max(0.3, min(2.5, quality)), 2)
 
     # =================================================================
     #  BÖLÜM 13 — GATE 3: DISPLACEMENT + MSS (Onay)
@@ -714,9 +1061,10 @@ class ICTStrategy:
         n = len(df)
         max_lookahead = 15  # Sweep sonrası max 15 mum içinde olmalı
 
-        # --- Displacement Tespiti ---
+        # --- ATR-Normalized Displacement Tespiti ---
         min_body_ratio = self.params.get("displacement_min_body_ratio", 0.7)
         min_size_pct = self.params.get("displacement_min_size_pct", 0.005)
+        atr = self._calc_atr(df, period=14)
         displacement = None
 
         for i in range(sweep_idx + 1, min(sweep_idx + max_lookahead + 1, n)):
@@ -728,23 +1076,30 @@ class ICTStrategy:
                 continue
 
             body_ratio = body / total_range
-            size_pct = body / mid_price
 
-            if body_ratio >= min_body_ratio and size_pct >= min_size_pct:
+            # ★ ATR-Normalized: gövde >= 1.5 × ATR VEYA sabit threshold
+            is_disp = body_ratio >= min_body_ratio and (
+                (atr > 0 and body >= atr * 1.5) or
+                (body / mid_price >= min_size_pct)
+            )
+
+            if is_disp:
                 candle_dir = "BULLISH" if candle["close"] > candle["open"] else "BEARISH"
-                # LONG → displacement BULLISH olmalı
+                atr_mult = round(body / atr, 2) if atr > 0 else 0
                 if bias == "LONG" and candle_dir == "BULLISH":
                     displacement = {
                         "index": i, "direction": "BULLISH",
                         "body_ratio": round(body_ratio, 3),
-                        "size_pct": round(size_pct * 100, 3)
+                        "size_pct": round((body / mid_price) * 100, 3),
+                        "atr_multiple": atr_mult
                     }
                     break
                 elif bias == "SHORT" and candle_dir == "BEARISH":
                     displacement = {
                         "index": i, "direction": "BEARISH",
                         "body_ratio": round(body_ratio, 3),
-                        "size_pct": round(size_pct * 100, 3)
+                        "size_pct": round((body / mid_price) * 100, 3),
+                        "atr_multiple": atr_mult
                     }
                     break
 
@@ -906,6 +1261,15 @@ class ICTStrategy:
             # En yakın olanı seç (unnecessarily geniş SL'den kaçın)
             best = max(valid, key=lambda x: x[1])
 
+            # ATR minimum SL floor: SL mesafesi en az 1.0 × ATR olmalı
+            atr = self._calc_atr(df, 14)
+            if atr > 0:
+                entry_approx = df["close"].iloc[-1]
+                min_sl_by_atr = entry_approx - atr
+                if best[1] > min_sl_by_atr:
+                    best = ("ATR_FLOOR", min_sl_by_atr)
+                    logger.debug(f"  LONG SL: ATR floor uygulandı → {best[1]:.8f}")
+
             logger.debug(f"  LONG SL: {best[0]} @ {best[1]:.8f}")
             return best[1]
 
@@ -924,6 +1288,15 @@ class ICTStrategy:
                 return None
 
             best = min(valid, key=lambda x: x[1])
+
+            # ATR minimum SL floor: SL mesafesi en az 1.0 × ATR olmalı
+            atr = self._calc_atr(df, 14)
+            if atr > 0:
+                entry_approx = df["close"].iloc[-1]
+                max_sl_by_atr = entry_approx + atr
+                if best[1] < max_sl_by_atr:
+                    best = ("ATR_FLOOR", max_sl_by_atr)
+                    logger.debug(f"  SHORT SL: ATR floor uygulandı → {best[1]:.8f}")
 
             logger.debug(f"  SHORT SL: {best[0]} @ {best[1]:.8f}")
             return best[1]
@@ -1024,8 +1397,8 @@ class ICTStrategy:
             else:
                 return entry - (risk * min_rr)
 
-        # Minimum 1.5 R:R sağlayan en yakın yapısal hedefi seç
-        min_reward = risk * 1.5
+        # Minimum 2.0 R:R sağlayan en yakın yapısal hedefi seç
+        min_reward = risk * 2.0
 
         if bias == "LONG":
             valid = [(n, p) for n, p in tp_candidates if (p - entry) >= min_reward]
@@ -1033,7 +1406,7 @@ class ICTStrategy:
                 best = min(valid, key=lambda x: x[1])  # En yakın geçerli hedef
                 logger.debug(f"  LONG TP: {best[0]} @ {best[1]:.8f}")
                 return best[1]
-            # 1.5 RR sağlayan hedef yoksa en uzak olanı dene
+            # 2.0 RR sağlayan hedef yoksa en uzak olanı dene
             if tp_candidates:
                 best = max(tp_candidates, key=lambda x: x[1])
                 if (best[1] - entry) > risk:
@@ -1142,16 +1515,6 @@ class ICTStrategy:
 
         analysis["htf_bias_block"] = htf_bias_block
 
-        # === MTF (1H) ONAY ===
-        if multi_tf_data and "1H" in multi_tf_data and not multi_tf_data["1H"].empty:
-            mtf_struct = self.detect_market_structure(multi_tf_data["1H"])
-            analysis["mtf_trend"] = mtf_struct["trend"]
-            if mtf_struct["trend"] == structure["trend"]:
-                score += 3
-                components.append("MTF_CONFIRMATION")
-        else:
-            analysis["mtf_trend"] = "UNKNOWN"
-
         # === YÖN === 
         direction = None
         if structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
@@ -1159,6 +1522,38 @@ class ICTStrategy:
         elif structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
             direction = "SHORT"
         analysis["direction"] = direction
+
+        # === MTF (1H) ONAY — GÜÇLENDİRİLMİŞ ===
+        mtf_result = self._analyze_mtf_confirmation(multi_tf_data, structure, direction)
+        analysis["mtf_result"] = mtf_result
+
+        if mtf_result:
+            analysis["mtf_trend"] = mtf_result["mtf_trend"]
+            analysis["mtf_ob_confluence"] = mtf_result.get("ob_confluence", False)
+            analysis["mtf_fvg_confluence"] = mtf_result.get("fvg_confluence", False)
+
+            if mtf_result["bias_aligned"]:
+                score += 10
+                components.append("MTF_CONFIRMATION")
+
+                # 1H OB veya FVG ile çakışma bonusu
+                if mtf_result.get("ob_confluence"):
+                    score += 5
+                    components.append("MTF_OB_CONFLUENCE")
+                if mtf_result.get("fvg_confluence"):
+                    score += 3
+                    components.append("MTF_FVG_CONFLUENCE")
+            elif mtf_result.get("bias_conflict"):
+                # 1H aktif olarak karşı yönde → ceza
+                score -= 8
+                penalties.append("MTF_BIAS_CONFLICT(-8)")
+            else:
+                # 1H nötr → küçük bonus
+                score += 2
+        else:
+            analysis["mtf_trend"] = "UNKNOWN"
+            analysis["mtf_ob_confluence"] = False
+            analysis["mtf_fvg_confluence"] = False
 
         # === LIQUIDITY SWEEP ===
         bias_for_sweep = direction or (htf_result["bias"] if htf_result else None)
@@ -1169,8 +1564,15 @@ class ICTStrategy:
             sweep = self._find_sweep_event(df, bias_for_sweep)
             analysis["sweep"] = sweep
             if sweep:
-                score += 20
+                # Sweep kalite çarpanı: Düşük kalite sweep daha az puan alır
+                sweep_quality = sweep.get("sweep_quality", 1.0)
+                sweep_base = 20
+                sweep_score = round(sweep_base * sweep_quality)
+                score += min(sweep_score, 35)  # Max 35 puan (yüksek kalite sweep bonusu)
                 components.append("LIQUIDITY_SWEEP")
+                if sweep_quality >= 1.5:
+                    components.append("HIGH_QUALITY_SWEEP")
+                analysis["sweep_quality"] = sweep_quality
                 sweep_detected = True
 
                 # Sweep sonrası displacement + MSS?
@@ -1266,7 +1668,7 @@ class ICTStrategy:
         liquidity = self.find_liquidity_levels(df)
         analysis["liquidity"] = liquidity
 
-        # === DISPLACEMENT (genel — sweep bağımsız) ===
+        # === DISPLACEMENT (genel — sweep bağımsız + hacim bonusu) ===
         if "DISPLACEMENT" not in components:
             displacements = self.detect_displacement(df)
             analysis["displacements"] = displacements
@@ -1276,6 +1678,14 @@ class ICTStrategy:
                    (direction == "SHORT" and last_d["direction"] == "BEARISH"):
                     score += 8
                     components.append("DISPLACEMENT")
+                    # Hacim bonusu: Yüksek hacimli displacement daha güvenilir
+                    vol_ratio = last_d.get("volume_ratio", 1.0)
+                    if vol_ratio >= 2.0:
+                        score += 5
+                        components.append("HIGH_VOLUME_DISPLACEMENT")
+                    elif vol_ratio >= 1.5:
+                        score += 3
+                        components.append("ABOVE_AVG_VOLUME")
             if "DISPLACEMENT" not in components:
                 score -= 8
                 penalties.append("NO_DISPLACEMENT(-8)")
@@ -1299,13 +1709,24 @@ class ICTStrategy:
                     score += 3
                     components.append("OTE")
 
-        # === SESSION KALİTESİ ===
-        if session_info["quality"] >= 0.8:
-            score += 5
+        # === SESSION KALİTESİ (KRİPTO OPTİMİZE — CEZA YOK) ===
+        # Kripto 7/24 işlem görür. Session cezası kaldırıldı.
+        # Sadece killzone ve aktif saatler için bonus verilir.
+        if session_info["quality"] >= 1.0:
+            # London/NY Killzone — kurumsal aktivite zirvesi
+            score += 8
             components.append("KILLZONE_ACTIVE")
-        elif session_info["quality"] <= 0.3:
-            score -= 5
-            penalties.append("OFF_HOURS(-5)")
+        elif session_info["quality"] >= 0.85:
+            # Asian session — kripto için çok aktif
+            score += 5
+            components.append("CRYPTO_ACTIVE_SESSION")
+        elif session_info["quality"] >= 0.8:
+            # London Close / London-NY geçiş
+            score += 4
+            components.append("KILLZONE_ACTIVE")
+        elif session_info["quality"] >= 0.7:
+            # Off-peak — kripto hâlâ aktif, küçük bonus
+            score += 2
 
         # === RANGING CEZASI ===
         if is_ranging:
@@ -1317,8 +1738,22 @@ class ICTStrategy:
             score += 3
             components.append("TRIPLE_TF_ALIGNMENT")
 
+        # === NON-LINEAR CONFLUENCE ÇARPANI ===
+        # Çekirdek gate'ler (Sweep + MSS) birlikte varsa → toplam skoru güçlendir
+        # Bu sayede sekonder bileşenler tek başına yüksek skor üretemez
+        if "LIQUIDITY_SWEEP" in components and "SWEEP_MSS_A_PLUS" in components:
+            score = round(score * 1.20)
+            components.append("CORE_GATE_MULTIPLIER")
+        elif "HTF_CONFIRMATION" in components and "LIQUIDITY_SWEEP" in components and "DISPLACEMENT" in components:
+            score = round(score * 1.15)
+            components.append("HTF_SWEEP_DISP_MULTIPLIER")
+
         # Normalize (0-100)
-        max_possible = 130  # tüm bonuslar dahil teorik max
+        # Teorik max: HTF(25) + Sweep(35) + Disp(15) + FVG(15) + Structure(10)
+        #   + MTF(10) + MTF_OB(5) + MTF_FVG(3) + PD(7) + OTE(3) + Session(8)
+        #   + OB(5) + Breaker(5) + MSS(10) + Triple_TF(3) + VolDisp(5)
+        #   + Non-linear multiplier(×1.2) = ~197 max
+        max_possible = 197  # Sweep quality + volume displacement + NL multiplier dahil
         score = max(0, score)
         confluence_score = min(100, round((score / max_possible) * 100, 1))
 
@@ -1385,9 +1820,8 @@ class ICTStrategy:
         if structure.get("trend") in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
             penalty += 5
 
-        session = analysis.get("session", {})
-        if session.get("quality", 1.0) <= 0.3:
-            penalty += 5
+        # Session cezası zaten confluence'da uygulandığı için
+        # confidence'da tekrar uygulanmaz (double-count engeli).
 
         confidence = max(0, min(100, base + bonus - penalty))
         return round(confidence, 1)
@@ -1419,22 +1853,66 @@ class ICTStrategy:
 
         # ===== GATE 0: Ranging Market → Sinyal üretme =====
         if self.detect_ranging_market(df):
+            logger.debug(f"🚫 {symbol}: RANGING market → atlandı")
             return None
 
         # ===== GATE 1: HTF Bias (4H) → Yön tayini =====
         htf_result = self._analyze_htf_bias(multi_tf_data)
         if htf_result is None:
+            logger.debug(f"🚫 {symbol}: HTF belirsiz (NEUTRAL) → atlandı")
             return None  # HTF belirsiz → İŞLEM YOK
         bias = htf_result["bias"]  # "LONG" veya "SHORT"
 
         # LTF (15m) yapı analizi
         structure = self.detect_market_structure(df)
 
-        # LTF trend HTF bias'a KARŞI mı? → Bekle (henüz dönmedi)
+        # LTF trend HTF bias'a KARŞI mı?
+        # ICT'de bu SETUP OLUŞUM AŞAMASI olabilir:
+        #   4H BULLISH + 15m BEARISH = fiyat discount'a çekiliyor → sweep bekle
+        #   4H BEARISH + 15m BULLISH = fiyat premium'a çıkıyor → sweep bekle
+        # Tamamen reddetmek yerine WATCH'a al — sweep olursa A+ setup olur.
         if bias == "LONG" and structure["trend"] == "BEARISH":
+            # Potansiyel setup oluşum aşaması: Sweep + MSS ile 15m dönebilir
+            analysis = self.calculate_confluence(df, multi_tf_data)
+            confidence = self._calculate_confidence(analysis)
+            # Sadece HTF güçlü + bazı bileşenler varsa WATCH'a al
+            if confidence >= 25 and "HTF_CONFIRMATION" in analysis.get("components", []):
+                logger.debug(f"👀 {symbol}: LTF BEARISH vs HTF LONG → Setup oluşum WATCH")
+                return self._build_signal_dict(
+                    symbol, bias, current_price, analysis, confidence,
+                    action="WATCH",
+                    watch_reason="HTF LONG ama LTF henüz bearish — sweep + MSS ile dönüş bekleniyor"
+                )
+            logger.debug(f"🚫 {symbol}: LTF BEARISH vs HTF LONG → yetersiz çakışma")
             return None
         if bias == "SHORT" and structure["trend"] == "BULLISH":
+            analysis = self.calculate_confluence(df, multi_tf_data)
+            confidence = self._calculate_confidence(analysis)
+            if confidence >= 25 and "HTF_CONFIRMATION" in analysis.get("components", []):
+                logger.debug(f"👀 {symbol}: LTF BULLISH vs HTF SHORT → Setup oluşum WATCH")
+                return self._build_signal_dict(
+                    symbol, bias, current_price, analysis, confidence,
+                    action="WATCH",
+                    watch_reason="HTF SHORT ama LTF henüz bullish — sweep + MSS ile dönüş bekleniyor"
+                )
+            logger.debug(f"🚫 {symbol}: LTF BULLISH vs HTF SHORT → yetersiz çakışma")
             return None
+
+        # ===== GATE 1.5: MTF (1H) Doğrulama =====
+        direction_for_mtf = bias
+        mtf_result = self._analyze_mtf_confirmation(multi_tf_data, structure, direction_for_mtf)
+        if mtf_result and mtf_result.get("bias_conflict"):
+            # 1H aktif olarak karşı yönde → dikkatli ol, WATCH olarak devam et
+            logger.debug(f"⚠️ {symbol}: 1H bias uyumsuz ({mtf_result['mtf_trend']} vs {bias}), WATCH'a yönlendiriliyor")
+            analysis = self.calculate_confluence(df, multi_tf_data)
+            confidence = self._calculate_confidence(analysis)
+            if confidence < 50:  # 1H conflict + düşük güven → sinyal yok
+                return None
+            return self._build_signal_dict(
+                symbol, bias, current_price, analysis, confidence,
+                action="WATCH",
+                watch_reason=f"1H trend uyumsuz ({mtf_result['mtf_trend']}), doğrulama bekleniyor"
+            )
 
         # ===== GATE 2: Liquidity Sweep → Stop hunt tespiti =====
         sweep = self._find_sweep_event(df, bias)
@@ -1501,13 +1979,16 @@ class ICTStrategy:
             return None
 
         rr_ratio = reward / risk
-        if rr_ratio < 1.5:
+        if rr_ratio < 2.0:
             return None
 
         # SL mesafesi kontrolleri
         sl_distance_pct = risk / entry
-        if sl_distance_pct < 0.003:
-            return None  # SL çok yakın → volatilitede vurulur
+        atr_val = self._calc_atr(df, 14)
+        min_sl_by_atr = atr_val / entry if atr_val > 0 and entry > 0 else 0.003
+        effective_min_sl = max(0.003, min_sl_by_atr)
+        if sl_distance_pct < effective_min_sl:
+            return None  # SL ATR floor altında → volatilitede vurulur
         if sl_distance_pct > 0.06:
             return None  # SL çok uzak → risk çok yüksek
 
@@ -1530,6 +2011,12 @@ class ICTStrategy:
         session = self.get_session_info()
         components = analysis.get("components", [])
 
+        # Quality Tier belirleme (optimizer öğrensin)
+        if confirmation["mss_confirmed"]:
+            quality_tier = "A+"  # Sweep + Displacement + MSS = en güçlü
+        else:
+            quality_tier = "A"   # Sweep + Displacement = güçlü
+
         result = {
             "symbol": symbol,
             "direction": bias,
@@ -1549,6 +2036,7 @@ class ICTStrategy:
             "entry_mode": entry_mode,
             "htf_bias": htf_result["htf_trend"],
             "sweep_level": sweep["swept_level"],
+            "quality_tier": quality_tier,
             "analysis": analysis
         }
 
@@ -1560,7 +2048,7 @@ class ICTStrategy:
                 f"RR: {rr_ratio:.1f} | Score: {confluence_score} | Conf: {confidence}% | "
                 f"Mode: {entry_mode} | Session: {session['label']}"
             )
-        elif confluence_score >= min_confluence * 0.7:
+        elif confluence_score >= min_confluence * 0.5:
             result["action"] = "WATCH"
             result["watch_reason"] = self._get_watch_reason(analysis)
             logger.info(
@@ -1578,25 +2066,201 @@ class ICTStrategy:
 
     def _build_watch_from_potential(self, symbol, df, multi_tf_data, htf_result, structure, bias):
         """
-        Sweep henüz olmadığında potansiyel WATCH sinyali oluştur.
-        Sadece yeterli potansiyel varsa (yüksek skor) döndürür.
+        Sweep henüz olmadığında potansiyel WATCH veya B-tier SIGNAL oluştur.
+
+        Sweep olmadan da sinyal üretilebilir (Tier-B) — ancak şartlar:
+          1. HTF bias uyumlu (Gate 1 geçti)
+          2. MTF (1H) onaylıyor
+          3. Displacement tespit edildi
+          4. FVG mevcut ve fiyat yakınında
+          5. OB desteği var (tercihen)
+
+        Bu sayede optimizer yeterli veri toplayıp öğrenebilir.
+        Sweep'li sinyaller hâlâ A/A+ tier olarak en yüksek öncelikli kalır.
         """
         analysis = self.calculate_confluence(df, multi_tf_data)
         confluence_score = analysis["confluence_score"]
-        min_confluence = self.params.get("min_confluence_score", 70)
-
-        # En az %60 potansiyel olmalı (sweep olmadan SIGNAL asla olmaz)
-        if confluence_score < min_confluence * 0.6:
-            return None
-
         confidence = self._calculate_confidence(analysis)
+        min_confluence = self.params.get("min_confluence_score", 60)
         current_price = df["close"].iloc[-1]
+        components = analysis.get("components", [])
+
+        # === B-Tier SIGNAL: Sweep yok ama yeterli çakışma var ===
+        # HTF zorunlu + destekleyici bileşenlerden en az 2 tanesi
+        has_htf = "HTF_CONFIRMATION" in components
+        has_displacement = "DISPLACEMENT" in components
+        has_fvg = "FVG" in components
+        has_mtf = "MTF_CONFIRMATION" in components
+        has_ob = "ORDER_BLOCK" in components
+        has_structure = "MARKET_STRUCTURE" in components
+
+        # HTF + herhangi 2 destekleyici bileşen
+        support_count = sum([has_displacement, has_fvg, has_mtf, has_ob, has_structure])
+        
+        if has_htf and support_count >= 2 and confidence >= min_confluence * 0.5:
+            # B-tier sinyal: yapısal giriş noktası hesapla
+            # NOT: B-tier sinyaller HER ZAMAN WATCH olarak kalır.
+            # Sweep olmadan trade açmak ICT'ye aykırıdır.
+            # Bu sinyaller optimizer'ın öğrenmesi ve kullanıcıya bilgi
+            # vermesi içindir — otomatik trade'e dönüşmez.
+            b_signal = self._build_no_sweep_signal(
+                symbol, df, multi_tf_data, bias, structure, analysis, confidence
+            )
+            if b_signal:
+                # B-tier'ı zorla WATCH yap (hiçbir zaman SIGNAL olmamalı)
+                b_signal["action"] = "WATCH"
+                b_signal["watch_reason"] = (
+                    f"B-tier: Sweep yok — "
+                    f"{'|'.join(c for c in [has_displacement and 'DISP', has_fvg and 'FVG', has_mtf and 'MTF', has_ob and 'OB'] if c)}"
+                    f" | Trade için sweep + displacement gerekli"
+                )
+                return b_signal
+
+        # Yetersiz çakışma → standart WATCH
+        if confluence_score < min_confluence * 0.3:
+            return None
 
         return self._build_signal_dict(
             symbol, bias, current_price, analysis, confidence,
             action="WATCH",
             watch_reason="HTF bias uyumlu, likidite avı bekleniyor"
         )
+
+    def _build_no_sweep_signal(self, symbol, df, multi_tf_data, bias, structure, analysis, confidence):
+        """
+        Sweep olmadan B-tier sinyal oluştur.
+        FVG'den giriş, yapısal SL, likidite TP hesaplar.
+        """
+        current_price = df["close"].iloc[-1]
+        components = analysis.get("components", [])
+
+        # En yakın uygun FVG'yi bul
+        fvgs = self.find_fvg(df)
+        target_type = "BULLISH_FVG" if bias == "LONG" else "BEARISH_FVG"
+        entry_fvg = None
+
+        for fvg in fvgs:
+            if fvg["type"] == target_type:
+                # Fiyat FVG bölgesinde veya yakınında mı?
+                if fvg["low"] * 0.995 <= current_price <= fvg["high"] * 1.005:
+                    entry_fvg = fvg
+                    break
+
+        if entry_fvg is None:
+            return None
+
+        # Entry = FVG CE
+        entry = (entry_fvg["high"] + entry_fvg["low"]) / 2
+
+        # Yapısal SL (sweep yok → swing seviyelerinden hesapla)
+        sl = self._calc_no_sweep_sl(df, bias, structure, entry)
+        if sl is None:
+            return None
+
+        # TP hesapla
+        tp = self._calc_opposing_liquidity_tp(df, multi_tf_data, entry, sl, bias, structure)
+        if tp is None:
+            return None
+
+        # Seviye doğrulama
+        if bias == "LONG":
+            if sl >= entry or tp <= entry:
+                return None
+            risk = entry - sl
+            reward = tp - entry
+        else:
+            if sl <= entry or tp >= entry:
+                return None
+            risk = sl - entry
+            reward = entry - tp
+
+        if risk <= 0:
+            return None
+
+        rr_ratio = reward / risk
+        if rr_ratio < 2.0:
+            return None
+
+        sl_distance_pct = risk / entry
+        if sl_distance_pct < 0.003 or sl_distance_pct > 0.06:
+            return None
+
+        # Entry modu
+        price_at_fvg = entry_fvg["low"] * 0.998 <= current_price <= entry_fvg["high"] * 1.002
+        entry_mode = "MARKET" if price_at_fvg else "LIMIT"
+
+        session = self.get_session_info()
+        min_confluence = self.params.get("min_confluence_score", 60)
+        min_confidence = self.params.get("min_confidence", 65)
+
+        result = {
+            "symbol": symbol,
+            "direction": bias,
+            "entry": round(entry, 8),
+            "sl": round(sl, 8),
+            "tp": round(tp, 8),
+            "current_price": round(current_price, 8),
+            "confluence_score": analysis["confluence_score"],
+            "confidence": confidence,
+            "components": components,
+            "penalties": analysis.get("penalties", []),
+            "session": session.get("label", ""),
+            "rr_ratio": round(rr_ratio, 2),
+            "entry_type": f"FVG NoSweep ({entry_fvg['type']})",
+            "sl_type": "Yapısal Seviye (Swing Point)",
+            "tp_type": self._get_tp_type(analysis, tp, bias),
+            "entry_mode": entry_mode,
+            "htf_bias": analysis.get("htf_trend", ""),
+            "quality_tier": "B",
+            "analysis": analysis
+        }
+
+        # B-tier sinyaller HER ZAMAN WATCH olarak kalır
+        # Sweep olmadan ICT trade'i açılmaz
+        result["action"] = "WATCH"
+        result["watch_reason"] = (
+            f"B-tier: Sweep yok, trade için sweep + MSS gerekli | "
+            f"Score: {analysis['confluence_score']} | Conf: {confidence}%"
+        )
+        logger.info(
+            f"👀 B-TIER İZLEME: {symbol} {bias} | Entry: {entry:.8f} | "
+            f"RR: {rr_ratio:.1f} | Score: {analysis['confluence_score']} | "
+            f"Conf: {confidence}% | (sweep bekleniyor)"
+        )
+
+        return result
+
+    def _calc_no_sweep_sl(self, df, bias, structure, entry):
+        """
+        Sweep olmadan yapısal SL hesapla.
+        Son swing low/high'dan hesaplar.
+        """
+        if bias == "LONG":
+            candidates = []
+            if structure["last_swing_low"]:
+                candidates.append(structure["last_swing_low"]["price"] * 0.997)
+            # Son 20 mumun en düşüğü (fallback)
+            recent_low = df.tail(20)["low"].min()
+            candidates.append(recent_low * 0.997)
+
+            valid = [p for p in candidates if 0 < p < entry]
+            if not valid:
+                return None
+            return max(valid)  # Entry'ye en yakın geçerli SL
+
+        elif bias == "SHORT":
+            candidates = []
+            if structure["last_swing_high"]:
+                candidates.append(structure["last_swing_high"]["price"] * 1.003)
+            recent_high = df.tail(20)["high"].max()
+            candidates.append(recent_high * 1.003)
+
+            valid = [p for p in candidates if p > entry]
+            if not valid:
+                return None
+            return min(valid)  # Entry'ye en yakın geçerli SL
+
+        return None
 
     def _build_signal_dict(self, symbol, bias, current_price, analysis, confidence,
                            action="WATCH", watch_reason=""):
@@ -1661,9 +2325,7 @@ class ICTStrategy:
             reasons.append("Yapı onayı bekleniyor")
 
         for p in penalties:
-            if "OFF_HOURS" in p:
-                reasons.append("Killzone dışı saat")
-            elif "RANGING" in p:
+            if "RANGING" in p:
                 reasons.append("Yatay piyasa")
 
         if not reasons:

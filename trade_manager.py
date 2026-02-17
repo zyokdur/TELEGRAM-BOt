@@ -68,19 +68,23 @@ class TradeManager:
         """
         Strateji motorundan gelen sonucu işle.
         
-        HER sinyal önce izleme listesine alınır — doğrudan işlem açılmaz.
-        5 dakikalık grafikteki 3 mum kapanış onayı ZORUNLUDUR.
-        Bu, yanlış kırılımları ve fakeout'ları filtreler.
+        A+ / A tier SIGNAL → doğrudan işlem aç (sweep + displacement geçmiş)
+        B tier SIGNAL ve WATCH → izleme listesine al, 5m onay bekle
         """
         if signal_result is None:
             return None
 
         action = signal_result.get("action")
+        quality_tier = signal_result.get("quality_tier", "?")
 
-        if action in ["SIGNAL", "WATCH"]:
+        if action == "SIGNAL" and quality_tier in ("A+", "A"):
+            # A-tier sinyal: Tüm gate'ler geçmiş, doğrudan işlem aç
+            logger.info(f"🎯 {signal_result['symbol']} Tier-{quality_tier} SIGNAL → doğrudan işlem")
+            return self._open_trade(signal_result)
+        elif action in ["SIGNAL", "WATCH"]:
             if action == "SIGNAL":
                 signal_result = dict(signal_result)
-                signal_result["watch_reason"] = "Ön onay bulundu, 5m 3 mum kapanış doğrulaması bekleniyor"
+                signal_result["watch_reason"] = f"Tier-{quality_tier} onay bekleniyor, 5m doğrulama"
             return self._add_to_watch(signal_result)
 
         return None
@@ -108,18 +112,22 @@ class TradeManager:
                 logger.info(f"⏭️ {signal['symbol']} için zaten aktif/bekleyen işlem var, atlanıyor.")
                 return {"status": "REJECTED", "reason": "Aktif/bekleyen işlem mevcut"}
 
-        # Cooldown kontrolü (aynı coinde son X dakikada işlem yapılmış mı?)
+        # Cooldown kontrolü: Sadece KAPANMIŞ işlemler (WON/LOST/CANCELLED) için
+        # Watchlist expire ve bekleyen sinyaller cooldown'a dahil DEĞİL
         recent_history = get_signal_history(30)
         cooldown_minutes = int(self._param("signal_cooldown_minutes"))
         now = datetime.now()
         for s in recent_history:
             if s["symbol"] == signal["symbol"]:
-                created = s.get("created_at", "")
-                if created:
+                # Sadece gerçekten kapanmış işlemler cooldown oluşturur
+                if s.get("status") not in ("WON", "LOST", "CANCELLED"):
+                    continue
+                close_time = s.get("close_time") or s.get("created_at", "")
+                if close_time:
                     try:
-                        created_dt = datetime.fromisoformat(created)
-                        if (now - created_dt).total_seconds() < cooldown_minutes * 60:
-                            logger.info(f"⏳ {signal['symbol']} için {cooldown_minutes}dk cooldown aktif.")
+                        close_dt = datetime.fromisoformat(close_time)
+                        if (now - close_dt).total_seconds() < cooldown_minutes * 60:
+                            logger.info(f"⏳ {signal['symbol']} için {cooldown_minutes}dk cooldown aktif ({s['status']}).")
                             return {"status": "REJECTED", "reason": f"{cooldown_minutes}dk cooldown"}
                     except Exception:
                         pass
@@ -133,7 +141,18 @@ class TradeManager:
         initial_status = "WAITING" if entry_mode == "LIMIT" else "ACTIVE"
 
         # Giriş sebeplerini kaydet (optimizer öğrensin)
+        quality_tier = signal.get("quality_tier", "?")
+
+        # B-tier risk yönetimi: Pozisyon büyüklüğü tavsiyesi
+        position_note = ""
+        if quality_tier == "B":
+            position_note = " | ⚠️ B-TIER: %50 pozisyon önerilir (sweep yok)"
+        elif quality_tier == "A":
+            position_note = " | A-TIER: %75 pozisyon (MSS yok)"
+        # A+ = tam pozisyon (varsayılan)
+
         entry_reasons = (
+            f"Tier: {quality_tier} | "
             f"Mode: {entry_mode} | "
             f"RR: {signal.get('rr_ratio', '?')} | "
             f"Score: {signal['confluence_score']} | "
@@ -145,6 +164,7 @@ class TradeManager:
             f"TP: {signal.get('tp_type', '?')} | "
             f"Bileşenler: {', '.join(signal['components'])} | "
             f"Cezalar: {', '.join(signal.get('penalties', []))}"
+            f"{position_note}"
         )
 
         signal_id = add_signal(
@@ -193,9 +213,24 @@ class TradeManager:
     def _add_to_watch(self, signal):
         """İzleme listesine ekle (5m onay akışı)."""
         # Çok düşük skorlu sinyalleri izlemeye bile alma (flip-flop engel)
-        if signal.get("confluence_score", 0) < 20:
+        if signal.get("confluence_score", 0) < 25:
             logger.debug(f"⏭️ {signal['symbol']} skor çok düşük ({signal['confluence_score']}), izlemeye alınmadı")
             return None
+
+        # ===== DUPLICATE KORUMASI =====
+        # Aynı coinde aktif/bekleyen trade varsa izlemeye almayı engelle
+        active_signals = get_active_signals()
+        for s in active_signals:
+            if s["symbol"] == signal["symbol"] and s["status"] in ("ACTIVE", "WAITING"):
+                logger.debug(f"⏭️ {signal['symbol']} zaten aktif/bekleyen işlemde, izlemeye alınmadı")
+                return None
+
+        # Aynı coinde zaten izleme varsa tekrar ekleme (log spam engeli)
+        watching_items = get_watching_items()
+        for w in watching_items:
+            if w["symbol"] == signal["symbol"] and w["direction"] == signal["direction"]:
+                logger.debug(f"⏭️ {signal['symbol']} zaten izleme listesinde, atlanıyor")
+                return {"status": "ALREADY_WATCHING", "watch_id": w["id"], "symbol": signal["symbol"]}
 
         watch_candles = WATCH_CONFIRM_CANDLES
         watch_id = add_to_watchlist(
@@ -555,81 +590,111 @@ class TradeManager:
 
             candles_watched += 1
 
-            # Confluence analizi (strateji motoruyla)
-            analysis = strategy_engine.calculate_confluence(watch_df, multi_tf)
-            new_score = analysis["confluence_score"]
-            confidence = strategy_engine._calculate_confidence(analysis)
-
-            components = analysis.get("components", [])
-            direction_ok = analysis.get("direction") == expected_direction
-            market_ok = not analysis.get("is_ranging", False)
-
-            # ICT kalite bileşenleri — en az 1 tanesi olmalı
-            ict_quality_hits = sum([
-                "DISPLACEMENT" in components,
-                "ORDER_BLOCK" in components,
-                "FVG" in components,
-                "LIQUIDITY_SWEEP" in components,
-                "OTE" in components,
-                "BREAKER_BLOCK" in components,
-            ])
-            has_ict_quality = ict_quality_hits >= 1
-
-            # Onay kriterleri
+            # === 5m Onay Analizi (basitleştirilmiş) ===
+            # 5m veride tam ICT analizi yapmak yerine, yön uyumu ve fiyat
+            # hareketi kontrol edilir. Çünkü ICT yapıları (FVG, OB vb.)
+            # 15m'de tespit edilmiştir — 5m'de aynı yapıları aramak anlamsız.
+            
+            # 1) Yön kontrolü: 5m yapısal trend
+            structure_5m = strategy_engine.detect_market_structure(watch_df)
+            trend_5m = structure_5m.get("trend", "NEUTRAL")
+            
+            if expected_direction == "LONG":
+                direction_ok = trend_5m in ["BULLISH", "WEAKENING_BEAR", "NEUTRAL"]
+            else:
+                direction_ok = trend_5m in ["BEARISH", "WEAKENING_BULL", "NEUTRAL"]
+            
+            # 2) Ranging kontrolü
+            market_ok = not strategy_engine.detect_ranging_market(watch_df)
+            
+            # 3) Fiyat hareketi kontrolü: Son mum yöne uygun mu?
+            last_candle = watch_df.iloc[-1]
+            if expected_direction == "LONG":
+                price_ok = last_candle["close"] >= last_candle["open"]  # Yeşil mum
+            else:
+                price_ok = last_candle["close"] <= last_candle["open"]  # Kırmızı mum
+            
+            # 4) Potansiyel entry hâlâ geçerli mi?
+            potential_entry = item.get("potential_entry", 0)
+            potential_sl = item.get("potential_sl", 0)
+            current_5m_price = last_candle["close"]
+            
+            if expected_direction == "LONG":
+                level_ok = current_5m_price > potential_sl if potential_sl > 0 else True
+            else:
+                level_ok = current_5m_price < potential_sl if potential_sl > 0 else True
+            
+            # Basit skor: Başlangıç skorunun yönsel korunması
+            new_score = item["initial_score"]  # Değişmediğini varsay
+            if not direction_ok:
+                new_score *= 0.3
+            if not market_ok:
+                new_score *= 0.5
+            
+            # Onay kriterleri (basitleştirilmiş)
             candle_confirmed = all([
                 direction_ok,
-                market_ok,
-                has_ict_quality,
-                new_score >= (min_confluence * 0.6),
+                market_ok or price_ok,  # İkisinden biri yeterli
+                level_ok,
             ])
             if candle_confirmed:
                 confirmation_count += 1
 
             logger.debug(
                 f"  👁️ {symbol} mum #{candles_watched}: "
-                f"yön={'✓' if direction_ok else '✗'} "
-                f"ICT={ict_quality_hits} "
-                f"skor={new_score:.0f} "
+                f"yön={'✓' if direction_ok else '✗'}({trend_5m}) "
+                f"market={'✓' if market_ok else '✗'} "
+                f"price={'✓' if price_ok else '✗'} "
+                f"level={'✓' if level_ok else '✗'} "
                 f"onay={confirmation_count}/{candles_watched}"
             )
 
-            # 3 kapanış tamamlandıysa nihai karar ver
+            # Mum onayı tamamlandıysa nihai karar ver
             if candles_watched >= max_watch:
-                signal_result = strategy_engine.generate_signal(symbol, watch_df, multi_tf)
-
-                if confirmation_count >= required_confirmations and \
-                   signal_result and signal_result.get("action") == "SIGNAL":
-                    promote_watchlist_item(item["id"])
-                    trade_result = self._open_trade(signal_result)
-                    promoted.append({
-                        "symbol": symbol,
-                        "action": "PROMOTED",
-                        "trade_result": trade_result
-                    })
-                    logger.info(
-                        f"⬆️ İZLEMEDEN SİNYALE: {symbol} | "
-                        f"Onay: {confirmation_count}/{candles_watched} | "
-                        f"Mode: {signal_result.get('entry_mode', '?')}"
-                    )
-                    continue
-
+                if confirmation_count >= required_confirmations:
+                    # 15m verisiyle sinyal üret (5m değil!)
+                    multi_15m_df = data_fetcher.get_candles(symbol, "15m", 120)
+                    if multi_15m_df is not None and not multi_15m_df.empty:
+                        signal_result = strategy_engine.generate_signal(symbol, multi_15m_df, multi_tf)
+                    else:
+                        signal_result = None
+                    
+                    if signal_result and signal_result.get("action") in ("SIGNAL", "WATCH"):
+                        promote_watchlist_item(item["id"])
+                        # WATCH bile olsa, 5m onaydan geçtiği için işleme al
+                        if signal_result.get("action") == "WATCH":
+                            signal_result = dict(signal_result)
+                            signal_result["action"] = "SIGNAL"
+                        trade_result = self._open_trade(signal_result)
+                        promoted.append({
+                            "symbol": symbol,
+                            "action": "PROMOTED",
+                            "trade_result": trade_result
+                        })
+                        logger.info(
+                            f"⬆️ İZLEMEDEN SİNYALE: {symbol} | "
+                            f"Onay: {confirmation_count}/{candles_watched} | "
+                            f"Mode: {signal_result.get('entry_mode', '?')}"
+                        )
+                        continue
+                
                 expire_watchlist_item(
                     item["id"],
-                    reason=f"3 mum onay yetersiz ({confirmation_count}/{candles_watched})"
+                    reason=f"Mum onay yetersiz ({confirmation_count}/{candles_watched})"
                 )
                 logger.info(
                     f"⏰ İZLEME BİTTİ: {symbol} | "
-                    f"Onay: {confirmation_count}/{candles_watched} | Son Score: {new_score}"
+                    f"Onay: {confirmation_count}/{candles_watched} | Son Score: {new_score:.1f}"
                 )
                 continue
 
-            # Score çok düşerse erken expire (eşik: başlangıcın %35'inin altı)
-            if new_score < item["initial_score"] * 0.35:
+            # SL seviyesi ihlal edildiyse erken expire
+            if not level_ok:
                 expire_watchlist_item(
                     item["id"],
-                    reason=f"Skor çok düştü ({item['initial_score']:.0f} → {new_score:.0f})"
+                    reason=f"SL seviyesi ihlal edildi ({symbol})"
                 )
-                logger.info(f"📉 İZLEME SKOR DÜŞTÜ: {symbol} | {item['initial_score']} → {new_score}")
+                logger.info(f"📉 İZLEME SL İHLAL: {symbol} | Yön tersine döndü")
                 continue
 
             # Güncelle ve beklemeye devam
