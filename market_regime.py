@@ -427,8 +427,8 @@ class MarketRegime:
                     continue
 
                 # Hacim doğrulaması
-                recent_vol = np.mean(coin_volumes[-4:])
-                avg_vol = np.mean(coin_volumes[-20:])
+                recent_vol = float(np.asarray(coin_volumes[-4:], dtype=float).mean())
+                avg_vol = float(np.asarray(coin_volumes[-20:], dtype=float).mean())
                 vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
 
                 # Hacim artıyorsa RS güçlenir, düşüyorsa zayıflar
