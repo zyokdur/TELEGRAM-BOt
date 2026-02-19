@@ -363,19 +363,29 @@ def api_optimization_logs():
 def api_optimization_summary():
     """Optimizasyon özeti"""
     summary = self_optimizer.get_optimization_summary()
+    summary["last_optimization"] = bot_state.get("last_optimization")
     return jsonify(summary)
 
 
 @app.route("/api/optimization/run", methods=["POST"])
 def api_run_optimization():
-    """Manuel optimizasyon tetikle (scan_lock ile korunur)"""
-    if not scan_lock.acquire(blocking=False):
-        return jsonify({"status": "BUSY", "reason": "Tarama devam ediyor, lütfen bekleyin"}), 409
+    """Manuel optimizasyon tetikle (scan_lock beklemeli — max 10s)"""
+    acquired = scan_lock.acquire(blocking=True, timeout=10)
+    if not acquired:
+        return jsonify({"status": "BUSY", "reason": "Tarama 10s içinde tamamlanamadı, lütfen tekrar deneyin"}), 409
     try:
         result = self_optimizer.run_optimization()
+        bot_state["last_optimization"] = datetime.now().isoformat()
         if result["changes"]:
             ict_strategy.reload_params()
+            socketio.emit("optimization_done", result)
+            logger.info(f"🧠 Manuel Optimizasyon: {len(result['changes'])} değişiklik")
+        else:
+            logger.info(f"🧠 Manuel Optimizasyon: Değişiklik gerekli değil — {result.get('reason', '')}")
         return jsonify(result)
+    except Exception as e:
+        logger.error(f"Manuel optimizasyon hatası: {e}")
+        return jsonify({"status": "ERROR", "reason": str(e), "changes": []}), 500
     finally:
         scan_lock.release()
 

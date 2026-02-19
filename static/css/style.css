@@ -1030,6 +1030,7 @@ body {
 .opt-card-icon.green { background: var(--green-dim); color: var(--green); }
 .opt-card-icon.blue { background: var(--blue-dim); color: var(--blue); }
 .opt-card-icon.purple { background: var(--purple-dim); color: var(--purple); }
+.opt-card-icon.amber { background: rgba(245,158,11,0.12); color: #f59e0b; }
 
 .opt-card-body { display: flex; flex-direction: column; }
 .opt-card-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; font-weight: 600; }

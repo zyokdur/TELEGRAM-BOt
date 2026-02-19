@@ -73,8 +73,10 @@ class SelfOptimizer:
             logger.info(f"Yeterli işlem yok ({total_trades}/{self.min_trades}), optimizasyon atlanıyor.")
             return {
                 "status": "SKIPPED",
-                "reason": f"Minimum {self.min_trades} işlem gerekli, şu an: {total_trades}",
-                "changes": []
+                "reason": f"Tamamlanmış (WON/LOST) işlem sayısı: {total_trades} — minimum {self.min_trades} gerekli. Aktif işlemler sayılmaz.",
+                "changes": [],
+                "total_trades_analyzed": total_trades,
+                "win_rate": stats["win_rate"]
             }
 
         changes = []

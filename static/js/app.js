@@ -622,6 +622,28 @@ async function loadOptimization() {
         document.getElementById("optTargetWR").textContent = `%${summary.target_win_rate || 60}`;
         document.getElementById("optChangedParams").textContent = summary.total_optimizations || 0;
 
+        // Son optimizasyon tarihi
+        const lastOptEl = document.getElementById("optLastDate");
+        if (lastOptEl) {
+            if (summary.last_optimization) {
+                lastOptEl.textContent = formatDate(summary.last_optimization);
+            } else {
+                lastOptEl.textContent = "Henüz çalışmadı";
+            }
+        }
+
+        // İşlem sayısı bilgisi
+        const tradeInfoEl = document.getElementById("optTradeInfo");
+        if (tradeInfoEl && summary.performance) {
+            const p = summary.performance;
+            const minNeeded = 5;
+            if (p.total_trades < minNeeded) {
+                tradeInfoEl.innerHTML = `<span style="color:var(--yellow)"><i class="fas fa-exclamation-triangle"></i> ${p.total_trades}/${minNeeded} tamamlanmış işlem (${minNeeded - p.total_trades} daha gerekli)</span>`;
+            } else {
+                tradeInfoEl.innerHTML = `<span style="color:var(--green)"><i class="fas fa-check-circle"></i> ${p.total_trades} tamamlanmış işlem — optimizer aktif</span>`;
+            }
+        }
+
         const paramsGrid = document.getElementById("changedParamsGrid");
         const changed = summary.changed_params || {};
         const keys = Object.keys(changed);
@@ -667,15 +689,25 @@ async function loadOptimization() {
 }
 
 async function runOptimization() {
-    showToast("Optimizasyon çalıştırılıyor...", "info");
-    const result = await apiPost("/api/optimization/run");
-    if (result) {
-        if (result.changes && result.changes.length > 0) {
+    showToast("Optimizasyon çalıştırılıyor... (tarama bitimini bekliyorum)", "info");
+    try {
+        const resp = await fetch("/api/optimization/run", { method: "POST" });
+        const result = await resp.json();
+
+        if (resp.status === 409) {
+            showToast(result.reason || "Tarama devam ediyor, tekrar deneyin", "warning");
+        } else if (resp.status === 500) {
+            showToast(`Hata: ${result.reason || "Bilinmeyen hata"}`, "error");
+        } else if (result.status === "SKIPPED") {
+            showToast(result.reason || "Yeterli işlem yok", "warning");
+        } else if (result.changes && result.changes.length > 0) {
             showToast(`${result.changes.length} parametre güncellendi!`, "success");
         } else {
-            showToast(result.reason || "Değişiklik gerekli değil", "info");
+            showToast("Optimizasyon tamamlandı — değişiklik gerekli değil", "info");
         }
         loadOptimization();
+    } catch (err) {
+        showToast("Optimizasyon isteği başarısız: " + err.message, "error");
     }
 }
 
