@@ -381,12 +381,14 @@ class ForexICTEngine:
                         break
                     if lows[k] <= ce_level:
                         ce_tested = True
+                status = "Dolduruldu" if filled else ("CE test edildi" if ce_tested else "Aktif")
                 gaps.append({
                     "type": "BULLISH_FVG",
                     "top": float(lows[i]), "bottom": float(highs[i - 2]),
                     "ce_level": float(ce_level),
                     "size": float(gap_size), "idx": i,
                     "filled": filled, "ce_tested": ce_tested,
+                    "desc": f"Yukari FVG: {float(highs[i-2]):.5f} - {float(lows[i]):.5f} arasi bosluk (CE: {float(ce_level):.5f}) [{status}]",
                 })
             # Bearish FVG
             if highs[i] < lows[i - 2]:
@@ -400,12 +402,14 @@ class ForexICTEngine:
                         break
                     if highs[k] >= ce_level:
                         ce_tested = True
+                status = "Dolduruldu" if filled else ("CE test edildi" if ce_tested else "Aktif")
                 gaps.append({
                     "type": "BEARISH_FVG",
                     "top": float(lows[i - 2]), "bottom": float(highs[i]),
                     "ce_level": float(ce_level),
                     "size": float(gap_size), "idx": i,
                     "filled": filled, "ce_tested": ce_tested,
+                    "desc": f"Asagi FVG: {float(highs[i]):.5f} - {float(lows[i-2]):.5f} arasi bosluk (CE: {float(ce_level):.5f}) [{status}]",
                 })
 
         return gaps[-12:]
@@ -475,7 +479,7 @@ class ForexICTEngine:
                             "level": float(highs[j]),
                             "sweep_price": float(highs[i]),
                             "idx": i,
-                            "desc": "Esit zirveler uzerinde likidite avi - dusus beklentisi"
+                            "desc": "Ust likidite supuruldu (EQH) — fiyat zirveler uzerine cikip geri dondu, dusus donusu beklenir"
                         })
                         break
             # Buy-side sweep (EQL altina inip donus)
@@ -487,7 +491,7 @@ class ForexICTEngine:
                             "level": float(lows[j]),
                             "sweep_price": float(lows[i]),
                             "idx": i,
-                            "desc": "Esit dipler altinda likidite avi - yukselis beklentisi"
+                            "desc": "Alt likidite supuruldu (EQL) — fiyat dipler altina inip geri dondu, yukselis donusu beklenir"
                         })
                         break
 
@@ -617,28 +621,73 @@ class ForexICTEngine:
     # ================================================================
 
     def detect_kill_zones(self):
-        """London / NY / Asian Kill Zone tespiti"""
+        """London / NY / Asian Kill Zone tespiti (EST bazli, DST uyumlu)"""
         now = datetime.utcnow()
         hour = now.hour
+        minute = now.minute
         active = None
         zones = []
 
+        # ICT Kill Zone'lari EST/EDT bazlidir
+        # UTC'den EST'e cevirme: kis UTC-5, yaz UTC-4
+        # Basit DST tespiti: Mart 2. Pazar - Kasim 1. Pazar
+        month = now.month
+        is_dst = 3 < month < 11  # Yaklasik DST (Mart sonu - Kasim basi)
+        if month == 3 and now.day >= 8:  # Mart 2. hafta sonrasi
+            is_dst = True
+        elif month == 11 and now.day < 7:  # Kasim 1. hafta oncesi
+            is_dst = True
+        est_offset = 4 if is_dst else 5
+
         kz_defs = [
-            ("Asian",    0, 3,  "00:00-03:00 UTC"),
-            ("London",   7, 10, "07:00-10:00 UTC"),
-            ("New York", 12, 15, "12:00-15:00 UTC"),
+            ("Asian",     0,  3,  "00:00-03:00 UTC",  "Asya piyasalari acik, dusuk volatilite, range olusumu"),
+            ("London",    7, 10,  "07:00-10:00 UTC",   "En yuksek likidite, trend baslangici, buyuk hacimliler"),
+            ("New York", 12, 15,  "12:00-15:00 UTC",   "NY acilisi, London ile overlap, en volatil donem"),
         ]
-        for name, start, end, hours_str in kz_defs:
+
+        for name, start, end, hours_str, zone_desc in kz_defs:
             is_active = start <= hour < end
+            remaining = ""
             if is_active:
                 active = name.upper().replace(" ", "_")
-            zones.append({"name": f"{name} Kill Zone", "active": is_active, "hours": hours_str})
+                mins_left = (end - hour - 1) * 60 + (60 - minute)
+                remaining = f" ({mins_left} dk kaldi)"
+            zones.append({
+                "name": f"{name} Kill Zone",
+                "active": is_active,
+                "hours": hours_str,
+                "est_hours": f"{(start - est_offset) % 24:02d}:00-{(end - est_offset) % 24:02d}:00 {'EDT' if is_dst else 'EST'}",
+                "desc": zone_desc,
+            })
+
+        # Sonraki KZ'yi bul
+        next_kz = None
+        for name, start, end, _, _ in kz_defs:
+            if hour < start:
+                mins_until = (start - hour) * 60 - minute
+                next_kz = f"{name} KZ {mins_until} dk sonra basliyor"
+                break
+        if not next_kz:
+            # Bugün bittiyse yarın Asian
+            mins_until = (24 - hour) * 60 - minute
+            next_kz = f"Asian KZ {mins_until} dk sonra basliyor"
+
+        if active:
+            active_zone = [z for z in zones if z["active"]][0]
+            mins_left = 0
+            for name, start, end, _, _ in kz_defs:
+                if name.upper().replace(" ", "_") == active:
+                    mins_left = (end - hour - 1) * 60 + (60 - minute)
+                    break
+            desc = f"{active.replace('_', ' ').title()} Kill Zone aktif - {mins_left} dk kaldi | Yuksek volatilite beklenir"
+        else:
+            desc = f"Kill Zone disinda - dusuk volatilite | {next_kz}"
 
         return {
             "active_zone": active, "zones": zones,
             "is_kill_zone": active is not None,
-            "desc": (f"[AKTIF] {active} Kill Zone - yuksek volatilite beklenir"
-                     if active else "Kill Zone disinda - dusuk volatilite"),
+            "next_kz": next_kz,
+            "desc": desc,
         }
 
     # ================================================================
@@ -647,36 +696,63 @@ class ForexICTEngine:
 
     def detect_silver_bullet(self):
         """
-        ICT Silver Bullet pencereleri:
-        - London SB: 03:00-04:00 EST (08:00-09:00 UTC)
-        - NY AM SB:  10:00-11:00 EST (15:00-16:00 UTC)
-        - NY PM SB:  14:00-15:00 EST (19:00-20:00 UTC)
+        ICT Silver Bullet pencereleri (DST uyumlu):
+        - London SB: 03:00-04:00 EST (08:00-09:00 UTC / yaz: 07:00-08:00 UTC)
+        - NY AM SB:  10:00-11:00 EST (15:00-16:00 UTC / yaz: 14:00-15:00 UTC)
+        - NY PM SB:  14:00-15:00 EST (19:00-20:00 UTC / yaz: 18:00-19:00 UTC)
         """
         now = datetime.utcnow()
         hour = now.hour
         minute = now.minute
 
+        # DST tespiti (Kill Zone ile ayni mantik)
+        month = now.month
+        is_dst = 3 < month < 11
+        if month == 3 and now.day >= 8:
+            is_dst = True
+        elif month == 11 and now.day < 7:
+            is_dst = True
+        est_offset = 4 if is_dst else 5
+
+        # EST bazli pencereler → UTC'ye cevir
         sb_windows = [
-            {"name": "London Silver Bullet", "start_h": 8, "end_h": 9,
+            {"name": "London Silver Bullet", "est_start": 3, "est_end": 4,
              "desc": "FVG giris firsati - London acilis"},
-            {"name": "NY AM Silver Bullet", "start_h": 15, "end_h": 16,
+            {"name": "NY AM Silver Bullet", "est_start": 10, "est_end": 11,
              "desc": "FVG giris firsati - New York sabah"},
-            {"name": "NY PM Silver Bullet", "start_h": 19, "end_h": 20,
+            {"name": "NY PM Silver Bullet", "est_start": 14, "est_end": 15,
              "desc": "FVG giris firsati - New York ogleden sonra"},
         ]
 
         active_sb = None
         for sb in sb_windows:
+            sb["start_h"] = sb["est_start"] + est_offset
+            sb["end_h"] = sb["est_end"] + est_offset
+            sb["hours"] = f"{sb['start_h']:02d}:00-{sb['end_h']:02d}:00 UTC"
+            sb["est_hours"] = f"{sb['est_start']:02d}:00-{sb['est_end']:02d}:00 {'EDT' if is_dst else 'EST'}"
             sb["active"] = sb["start_h"] <= hour < sb["end_h"]
             if sb["active"]:
+                mins_left = (sb["end_h"] - hour - 1) * 60 + (60 - minute)
+                sb["remaining"] = f"{mins_left} dk kaldi"
                 active_sb = sb
+
+        if active_sb:
+            desc = f"[AKTIF] {active_sb['name']} - {active_sb['desc']} ({active_sb['remaining']})"
+        else:
+            # Sonraki SB'yi bul
+            next_sb = None
+            for sb in sb_windows:
+                if hour < sb["start_h"]:
+                    mins_until = (sb["start_h"] - hour) * 60 - minute
+                    next_sb = f"{sb['name']} {mins_until} dk sonra"
+                    break
+            desc = f"Silver Bullet disinda" + (f" | {next_sb}" if next_sb else "")
 
         return {
             "windows": sb_windows,
             "active": active_sb,
             "is_active": active_sb is not None,
-            "desc": (f"[AKTIF] {active_sb['name']} - {active_sb['desc']}"
-                     if active_sb else "Silver Bullet penceresi disinda"),
+            "desc": desc,
         }
 
     # ================================================================
@@ -753,7 +829,13 @@ class ForexICTEngine:
     # ================================================================
 
     def detect_judas_swing(self, df):
-        """Kill Zone'da ilk hareketin tersi yonde sinyal"""
+        """Kill Zone'da ilk hareketin tersi yonde sinyal
+        Mum sayısı TF'ye göre ayarlanır:
+        - 15m: 8 mum (2 saat KZ penceresi)
+        - 1h:  4 mum
+        - 4h:  2 mum
+        - 1d:  sadece son 2 mum
+        """
         if len(df) < 10:
             return None
 
@@ -761,23 +843,30 @@ class ForexICTEngine:
         if not kill["is_kill_zone"]:
             return None
 
-        # Son 5 mumun ilk 2'si vs son 3'u
+        # TF'ye göre mum sayısını ayarla (ilk hareket ve geri dönüş)
         opens = df["open"].values
         closes = df["close"].values
 
-        first_move = closes[-5] - opens[-5]
-        last_move = closes[-1] - closes[-3]
+        # Toplam pencere: TF'ye göre adaptif
+        total_candles = min(8, len(df) - 1)  # default 15m: 8 mum
+        split = max(2, total_candles // 3)     # ilk %33 sahte hareket
+
+        first_move = closes[-total_candles] - opens[-total_candles]
+        # Son mumların toplam hareketi
+        last_move = closes[-1] - closes[-(total_candles - split)]
+
+        kz_name = kill["active_zone"].replace("_", " ").title()
 
         if first_move > 0 and last_move < 0 and abs(last_move) > abs(first_move) * 0.8:
             return {
                 "type": "BEARISH_JUDAS",
-                "desc": f"Judas Swing: {kill['active_zone']} acilisinda yukari sahte hareket, gercek yon asagi",
+                "desc": f"Judas Swing: {kz_name} acilisinda yukari sahte hareket, ardindan gercek yon asagi",
                 "kill_zone": kill["active_zone"]
             }
         elif first_move < 0 and last_move > 0 and abs(last_move) > abs(first_move) * 0.8:
             return {
                 "type": "BULLISH_JUDAS",
-                "desc": f"Judas Swing: {kill['active_zone']} acilisinda asagi sahte hareket, gercek yon yukari",
+                "desc": f"Judas Swing: {kz_name} acilisinda asagi sahte hareket, ardindan gercek yon yukari",
                 "kill_zone": kill["active_zone"]
             }
         return None
@@ -823,46 +912,73 @@ class ForexICTEngine:
     # ================================================================
 
     def detect_asian_range_breakout(self, df):
-        """Asian session range'i + London kirilim tespiti"""
+        """Asian session (00:00-08:00 UTC) range + London kirilim tespiti"""
         if len(df) < 10:
             return None
 
-        # Basitlesilmis: son 20 mumun ilk 8'i Asian, sonraki London
-        if len(df) < 20:
-            return None
+        # Timestamp sütunu varsa gerçek UTC saatlerine göre filtrele
+        has_ts = "timestamp" in df.columns
 
-        asian_highs = df["high"].iloc[-20:-12].values
-        asian_lows = df["low"].iloc[-20:-12].values
-        if len(asian_highs) == 0:
-            return None
+        if has_ts:
+            try:
+                ts = pd.to_datetime(df["timestamp"], utc=True)
+                today = ts.iloc[-1].normalize()  # bugünün 00:00 UTC
+                yesterday = today - pd.Timedelta(days=1)
 
-        asian_high = float(np.max(asian_highs))
-        asian_low = float(np.min(asian_lows))
-        asian_mid = (asian_high + asian_low) / 2
+                # Son Asian session: bugünün 00:00-08:00 UTC arası mumlar
+                asian_mask = (ts >= today) & (ts.dt.hour < 8)
+                if asian_mask.sum() < 2:
+                    # Bugün yeterli mum yoksa dünün Asian'ını kullan
+                    asian_mask = (ts >= yesterday) & (ts < yesterday + pd.Timedelta(hours=8))
+
+                if asian_mask.sum() >= 2:
+                    asian_df = df[asian_mask]
+                    asian_high = float(asian_df["high"].max())
+                    asian_low = float(asian_df["low"].min())
+                else:
+                    # Fallback: son 8 mum
+                    n = min(8, len(df) - 2)
+                    asian_high = float(df["high"].iloc[-n-8:-n].max()) if len(df) > n + 8 else float(df["high"].iloc[:8].max())
+                    asian_low = float(df["low"].iloc[-n-8:-n].min()) if len(df) > n + 8 else float(df["low"].iloc[:8].min())
+            except Exception:
+                # Parse hatası olursa fallback
+                n = min(20, len(df))
+                mid = n // 2
+                asian_high = float(df["high"].iloc[-n:-n+mid].max())
+                asian_low = float(df["low"].iloc[-n:-n+mid].min())
+        else:
+            # Timestamp yoksa eski mantık
+            if len(df) < 20:
+                return None
+            asian_high = float(df["high"].iloc[-20:-12].max())
+            asian_low = float(df["low"].iloc[-20:-12].min())
+
+        if asian_high <= asian_low:
+            return None
 
         cur_price = float(df["close"].iloc[-1])
+        asian_range_pips = asian_high - asian_low
 
-        breakout = None
         if cur_price > asian_high:
             breakout = {
                 "type": "BULLISH_BREAKOUT",
                 "asian_high": round(asian_high, 5),
                 "asian_low": round(asian_low, 5),
-                "desc": f"Asian Range yukari kirildi ({round(asian_high,5)})"
+                "desc": f"Asian Range (00:00-08:00 UTC) yukari kirildi. Range: {round(asian_low,5)} - {round(asian_high,5)}"
             }
         elif cur_price < asian_low:
             breakout = {
                 "type": "BEARISH_BREAKOUT",
                 "asian_high": round(asian_high, 5),
                 "asian_low": round(asian_low, 5),
-                "desc": f"Asian Range asagi kirildi ({round(asian_low,5)})"
+                "desc": f"Asian Range (00:00-08:00 UTC) asagi kirildi. Range: {round(asian_low,5)} - {round(asian_high,5)}"
             }
         else:
             breakout = {
                 "type": "INSIDE_RANGE",
                 "asian_high": round(asian_high, 5),
                 "asian_low": round(asian_low, 5),
-                "desc": f"Fiyat Asian Range icinde ({round(asian_low,5)} - {round(asian_high,5)})"
+                "desc": f"Fiyat Asian Range icinde. Range: {round(asian_low,5)} - {round(asian_high,5)}"
             }
 
         return breakout
@@ -1237,19 +1353,65 @@ class ForexICTEngine:
         if silver_bullet["is_active"]:
             desc += f" | {silver_bullet['active']['name']} penceresi acik."
 
-        # SL / TP hesapla
+        # SL / TP hesapla (ATR + Swing/OB bazli)
         atr = indicators["atr"]
         sl_tp = None
+
+        # Swing high/low bul (son 20 mum)
+        swing_lookback = min(20, len(df) - 1)
+        recent_highs = df["high"].iloc[-swing_lookback:].values
+        recent_lows = df["low"].iloc[-swing_lookback:].values
+        recent_swing_high = float(np.max(recent_highs))
+        recent_swing_low = float(np.min(recent_lows))
+
+        # OB sinirlari (varsa)
+        ob_top = None
+        ob_bottom = None
+        if obs:
+            active_obs = [o for o in obs if not o.get("mitigated", False)]
+            if active_obs:
+                last_ob = active_obs[-1]
+                ob_top = last_ob.get("top")
+                ob_bottom = last_ob.get("bottom")
+
         if signal in ("STRONG_LONG", "LONG"):
-            sl = round(cur_price - atr * 1.5, 5)
-            tp1 = round(cur_price + atr * 2.0, 5)
-            tp2 = round(cur_price + atr * 3.5, 5)
-            sl_tp = {"sl": sl, "tp1": tp1, "tp2": tp2, "direction": "LONG"}
+            # LONG SL: en yakın swing low veya OB alt sınırının altı
+            atr_sl = cur_price - atr * 1.5
+            swing_sl = recent_swing_low - atr * 0.2  # swing low'un biraz altı
+            candidates = [atr_sl, swing_sl]
+            if ob_bottom:
+                candidates.append(ob_bottom - atr * 0.1)
+            sl = round(max(candidates), 5)  # en yakın (en yüksek) SL
+            # SL çok yakınsa ATR bazlıyı kullan
+            if abs(cur_price - sl) < atr * 0.5:
+                sl = round(atr_sl, 5)
+
+            risk = abs(cur_price - sl)
+            tp1 = round(cur_price + risk * 1.5, 5)   # R:R 1:1.5
+            tp2 = round(cur_price + risk * 2.5, 5)   # R:R 1:2.5
+            rr1 = round(abs(tp1 - cur_price) / risk, 2) if risk > 0 else 0
+            rr2 = round(abs(tp2 - cur_price) / risk, 2) if risk > 0 else 0
+            sl_tp = {"sl": sl, "tp1": tp1, "tp2": tp2, "direction": "LONG",
+                     "rr1": rr1, "rr2": rr2, "method": "swing+ATR"}
+
         elif signal in ("STRONG_SHORT", "SHORT"):
-            sl = round(cur_price + atr * 1.5, 5)
-            tp1 = round(cur_price - atr * 2.0, 5)
-            tp2 = round(cur_price - atr * 3.5, 5)
-            sl_tp = {"sl": sl, "tp1": tp1, "tp2": tp2, "direction": "SHORT"}
+            # SHORT SL: en yakın swing high veya OB üst sınırının üstü
+            atr_sl = cur_price + atr * 1.5
+            swing_sl = recent_swing_high + atr * 0.2  # swing high'un biraz üstü
+            candidates = [atr_sl, swing_sl]
+            if ob_top:
+                candidates.append(ob_top + atr * 0.1)
+            sl = round(min(candidates), 5)  # en yakın (en düşük) SL
+            if abs(sl - cur_price) < atr * 0.5:
+                sl = round(atr_sl, 5)
+
+            risk = abs(sl - cur_price)
+            tp1 = round(cur_price - risk * 1.5, 5)
+            tp2 = round(cur_price - risk * 2.5, 5)
+            rr1 = round(abs(cur_price - tp1) / risk, 2) if risk > 0 else 0
+            rr2 = round(abs(cur_price - tp2) / risk, 2) if risk > 0 else 0
+            sl_tp = {"sl": sl, "tp1": tp1, "tp2": tp2, "direction": "SHORT",
+                     "rr1": rr1, "rr2": rr2, "method": "swing+ATR"}
 
         return {
             "instrument": instrument_key,

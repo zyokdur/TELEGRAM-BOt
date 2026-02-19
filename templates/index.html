@@ -647,7 +647,7 @@
                         <div class="fx-loading-spinner"></div>
                         <div class="fx-loading-text">
                             <span class="fx-loading-title">ICT Analizi Yapılıyor</span>
-                            <span class="fx-loading-sub">Market Structure • Order Block • FVG • Liquidity Sweep</span>
+                            <div class="fx-loading-sub">Piyasa Yapısı • Emir Blokları • FVG • Likidite Süpürme • OTE • Kill Zone • AMD</div>
                         </div>
                     </div>
                 </div>
@@ -702,8 +702,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-sitemap"></i>
-                            <span>Market Structure (BOS / CHoCH)</span>
+                            <span>Piyasa Yapısı (BOS / CHoCH)</span>
                         </div>
+                        <p class="fx-section-desc">Trend yönünü belirleyen HH/HL/LH/LL yapısı, kırılım (BOS) ve karakter değişimi (CHoCH) tespiti.</p>
                         <div class="fx-ms-card" id="fxMsCard"></div>
                     </div>
 
@@ -711,8 +712,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-cubes"></i>
-                            <span>Order Blocks (OB)</span>
+                            <span>Emir Blokları (OB)</span>
                         </div>
+                        <p class="fx-section-desc">Kurumsal alıcı/satıcı emirlerinin yoğunlaştığı fiyat bölgeleri. Fiyat bu bölgelere dönünce tepki beklenir.</p>
                         <div class="fx-ob-list" id="fxObList"></div>
                     </div>
 
@@ -720,8 +722,9 @@
                     <div class="fx-section" id="fxBreakerSection" style="display:none">
                         <div class="fx-section-head">
                             <i class="fas fa-shield-halved"></i>
-                            <span>Breaker Blocks</span>
+                            <span>Kırıcı Bloklar (Breaker)</span>
                         </div>
+                        <p class="fx-section-desc">Kırılan Order Block'lar — eski destek artık direnç (veya tersi) olarak çalışır.</p>
                         <div class="fx-ob-list" id="fxBreakerList"></div>
                     </div>
 
@@ -729,8 +732,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-layer-group"></i>
-                            <span>Fair Value Gaps (FVG) & CE</span>
+                            <span>Adil Değer Boşlukları (FVG) & CE</span>
                         </div>
+                        <p class="fx-section-desc">Üç mumlu formasyonda oluşan fiyat boşlukları. CE (Consequent Encroachment) = boşluğun %50 seviyesi.</p>
                         <div class="fx-ms-card" id="fxFvgCard"></div>
                     </div>
 
@@ -738,8 +742,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-bolt-lightning"></i>
-                            <span>Displacement & Liquidity Sweep</span>
+                            <span>Yer Değiştirme & Likidite Süpürme</span>
                         </div>
+                        <p class="fx-section-desc">Displacement: Güçlü momentum mumları. Likidite Süpürme: Eşit zirve/diplerin ötesindeki stop avı.</p>
                         <div class="fx-ms-card" id="fxDispLiqCard"></div>
                     </div>
 
@@ -747,8 +752,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-compass"></i>
-                            <span>Daily Bias / Power of 3 (AMD) / Judas Swing</span>
+                            <span>Günlük Yön / AMD (Power of 3) / Judas Swing</span>
                         </div>
+                        <p class="fx-section-desc">Günlük eğilim, Birikim-Manipülasyon-Dağıtım döngüsü ve Kill Zone açılışındaki sahte hareketler.</p>
                         <div class="fx-ms-card" id="fxBiasAmdCard"></div>
                     </div>
 
@@ -756,8 +762,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-percentage"></i>
-                            <span>Premium / Discount & OTE (Fib 0.618-0.786)</span>
+                            <span>Premium / İndirim Bölgesi & OTE (Fib 0.618-0.786)</span>
                         </div>
+                        <p class="fx-section-desc">Fiyatın swing aralığının üst (%50+) veya alt yarısında olup olmadığı. OTE = Optimal giriş bölgesi.</p>
                         <div class="fx-pd-card" id="fxPdCard"></div>
                     </div>
 
@@ -765,8 +772,9 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-list-check"></i>
-                            <span>ICT Confluence Gerekçeleri</span>
+                            <span>ICT Uyum Gerekçeleri</span>
                         </div>
+                        <p class="fx-section-desc">16 ICT konseptinin her birinin yön analizi — ne kadar çok uyum, o kadar güçlü sinyal.</p>
                         <div class="fx-reasons" id="fxReasons"></div>
                     </div>
 

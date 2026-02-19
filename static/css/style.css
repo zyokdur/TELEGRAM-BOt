@@ -2283,6 +2283,7 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .fx-card-sltp .sl { color: var(--red); }
 .fx-card-sltp .tp { color: var(--green); }
+.fx-card-sltp .rr { color: var(--yellow); }
 .fx-card-sltp i { font-size: 10px; }
 
 .fx-card-bottom {
@@ -2351,6 +2352,10 @@ button:focus:not(:focus-visible) { outline: none; }
     margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
 }
 .fx-section-head i { color: var(--blue); font-size: 14px; }
+.fx-section-desc {
+    font-size: 11px; color: var(--text-muted); margin: -8px 0 10px 22px;
+    line-height: 1.4; font-style: italic;
+}
 
 /* SL/TP Levels */
 .fx-levels-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
@@ -2362,6 +2367,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .fx-level-label.entry { color: var(--blue); }
 .fx-level-label.sl { color: var(--red); }
 .fx-level-label.tp { color: var(--green); }
+.fx-level-label.rr { color: var(--yellow); }
 .fx-level-val { font-size: 14px; font-weight: 700; color: var(--text-primary); font-family: var(--mono); }
 
 /* Market Structure */

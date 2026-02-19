@@ -1791,9 +1791,17 @@ async function loadForexKillZones() {
 
     const zonesEl = document.getElementById("kzZones");
     if (zonesEl) {
-        zonesEl.innerHTML = data.zones.map(z =>
-            `<span class="kz-zone-pill ${z.active ? 'active' : ''}">${z.name.split(' ')[0]} ${z.hours}</span>`
-        ).join("");
+        zonesEl.innerHTML = data.zones.map(z => {
+            const nameMap = {"Asian Kill Zone": "Asya", "London Kill Zone": "Londra", "New York Kill Zone": "New York"};
+            const label = nameMap[z.name] || z.name.split(' ')[0];
+            const estInfo = z.est_hours ? ` (${z.est_hours})` : "";
+            return `<span class="kz-zone-pill ${z.active ? 'active' : ''}" title="${z.desc || ''}">${label} ${z.hours}${estInfo}</span>`;
+        }).join("");
+    }
+
+    // Sonraki KZ bilgisi
+    if (data.next_kz && !data.is_kill_zone) {
+        document.getElementById("kzDesc").textContent = data.desc;
     }
 }
 
@@ -1931,9 +1939,11 @@ function renderForexCard(r) {
     // SL/TP mini bilgisi
     let slTpMini = "";
     if (r.sl_tp) {
+        const rrText = r.sl_tp.rr1 ? ` <span class="rr"><i class="fas fa-scale-balanced"></i> R:R 1:${r.sl_tp.rr1}</span>` : "";
         slTpMini = `<div class="fx-card-sltp">
             <span class="sl"><i class="fas fa-shield-halved"></i> SL: ${fmtPrice(r.sl_tp.sl)}</span>
             <span class="tp"><i class="fas fa-bullseye"></i> TP1: ${fmtPrice(r.sl_tp.tp1)}</span>
+            ${rrText}
         </div>`;
     }
 
@@ -1976,7 +1986,7 @@ function renderForexCard(r) {
             </div>
             <div class="fx-card-stats">
                 <span class="stat-item"><i class="fas fa-signal"></i> Net: ${r.net_score > 0 ? '+' : ''}${r.net_score}</span>
-                <span class="stat-item"><i class="fas fa-layer-group"></i> Conf: ${confMax}</span>
+                <span class="stat-item"><i class="fas fa-layer-group"></i> Uyum: ${confMax}/16</span>
                 <span class="stat-item"><i class="fas fa-gauge-simple"></i> RSI: ${r.indicators.rsi.toFixed(1)}</span>
                 <span class="stat-item"><i class="fas fa-chart-area"></i> ATR: ${r.indicators.atr_pct}%</span>
             </div>
@@ -2034,6 +2044,11 @@ async function openForexDetail(instrument) {
     const levelsGrid = document.getElementById("fxLevelsGrid");
     if (data.sl_tp) {
         slTpSection.style.display = "block";
+        const rrInfo = data.sl_tp.rr1 ? `
+            <div class="fx-level-item">
+                <div class="fx-level-label rr">Risk:Ödül</div>
+                <div class="fx-level-val">1:${data.sl_tp.rr1} / 1:${data.sl_tp.rr2}</div>
+            </div>` : "";
         levelsGrid.innerHTML = `
             <div class="fx-level-item">
                 <div class="fx-level-label entry">Giriş</div>
@@ -2051,6 +2066,7 @@ async function openForexDetail(instrument) {
                 <div class="fx-level-label tp">Take Profit 2</div>
                 <div class="fx-level-val">${fmtPrice(data.sl_tp.tp2)}</div>
             </div>
+            ${rrInfo}
         `;
     } else {
         slTpSection.style.display = "none";
