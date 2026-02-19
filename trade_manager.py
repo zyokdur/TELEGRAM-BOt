@@ -29,19 +29,18 @@ from database import (
     get_active_signals, update_signal_status, activate_signal,
     get_active_trade_count, add_signal, add_to_watchlist,
     get_watching_items, update_watchlist_item, promote_watchlist_item,
-    expire_watchlist_item, get_signal_history, get_bot_param
+    expire_watchlist_item, get_signal_history, get_bot_param,
+    update_signal_sl
 )
 from config import (
     ICT_PARAMS,
     WATCH_CONFIRM_TIMEFRAME,
     WATCH_CONFIRM_CANDLES,
-    WATCH_REQUIRED_CONFIRMATIONS
+    WATCH_REQUIRED_CONFIRMATIONS,
+    LIMIT_ORDER_EXPIRY_HOURS
 )
 
 logger = logging.getLogger("ICT-Bot.TradeManager")
-
-# Limit emir zaman aşımı (config'de yoksa varsayılan)
-LIMIT_ORDER_EXPIRY_HOURS = 6
 
 
 class TradeManager:
@@ -59,6 +58,34 @@ class TradeManager:
         # Breakeven / Trailing SL takibi
         # {signal_id: {"breakeven_moved": bool, "trailing_sl": float}}
         self._trade_state = {}
+        self._restore_trade_state()
+
+    def _restore_trade_state(self):
+        """Restart sonrası ACTIVE sinyallerin breakeven/trailing SL durumunu DB'den geri yükle."""
+        try:
+            active = get_active_signals()
+            for sig in active:
+                sid = sig["id"]
+                entry = sig.get("entry_price", 0)
+                sl = sig.get("stop_loss", 0)
+                direction = sig.get("direction", "LONG")
+                if entry and sl:
+                    # SL entry'den daha iyi bir yere taşınmışsa breakeven yapılmış demektir
+                    be_moved = False
+                    if direction == "LONG" and sl >= entry:
+                        be_moved = True
+                    elif direction == "SHORT" and sl <= entry:
+                        be_moved = True
+                    if be_moved:
+                        self._trade_state[sid] = {
+                            "breakeven_moved": True,
+                            "trailing_sl": sl
+                        }
+                        logger.info(f"♻️ {sig.get('symbol','?')} trade state restored: BE=True, SL={sl}")
+            if self._trade_state:
+                logger.info(f"♻️ {len(self._trade_state)} aktif sinyalin trade state'i geri yüklendi")
+        except Exception as e:
+            logger.error(f"Trade state geri yükleme hatası: {e}")
 
     def _param(self, name):
         """Optimizer ile güncellenen parametreleri DB'den oku, yoksa config varsayılanı kullan."""
@@ -490,8 +517,13 @@ class TradeManager:
                 if state["breakeven_moved"] or state.get("trailing_sl"):
                     result["effective_sl"] = round(effective_sl, 8)
 
-        # State kaydet
+        # State kaydet (bellekte)
         self._trade_state[signal_id] = state
+
+        # Breakeven/Trailing SL DB'ye de yaz (restart koruması)
+        if state["breakeven_moved"] or state.get("trailing_sl"):
+            update_signal_sl(signal_id, effective_sl)
+
         return result
 
     def _manage_long_sl(self, signal_id, symbol, entry_price, current_price,
@@ -705,6 +737,18 @@ class TradeManager:
                         signal_result = None
                     
                     if signal_result and signal_result.get("action") in ("SIGNAL", "WATCH"):
+                        # B-tier güvenlik: Sweep olmadan trade açma
+                        quality_tier = signal_result.get("quality_tier", "?")
+                        if quality_tier == "B":
+                            logger.info(
+                                f"⏭️ {symbol} B-tier sinyal → sweep yok, trade açılmadı. "
+                                f"5m onay geçti ama ICT kalitesi yetersiz."
+                            )
+                            expire_watchlist_item(
+                                item["id"],
+                                reason=f"B-tier sinyal — sweep eksik, trade açılmadı"
+                            )
+                            continue
                         promote_watchlist_item(item["id"])
                         # WATCH bile olsa, 5m onaydan geçtiği için işleme al
                         if signal_result.get("action") == "WATCH":

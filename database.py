@@ -383,6 +383,14 @@ def activate_signal(signal_id):
     """, (now, now, signal_id))
 
 
+def update_signal_sl(signal_id, new_sl):
+    """Breakeven/Trailing SL güncellemesini DB'ye yaz (restart koruması)."""
+    now = datetime.now().isoformat()
+    _execute("""
+        UPDATE signals SET stop_loss=?, updated_at=? WHERE id=?
+    """, (new_sl, now, signal_id))
+
+
 def get_active_signals():
     return _fetchall("""
         SELECT * FROM signals WHERE status IN ('ACTIVE', 'WAITING') ORDER BY created_at DESC
