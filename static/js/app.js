@@ -23,11 +23,14 @@ socket.on("bot_status", (data) => {
 });
 
 socket.on("new_signal", (data) => {
+    const dir = data.direction || "";
+    const statusLabel = data.status === "WATCHING" ? "İzleme" : "Sinyal";
     showToast(
-        `ICT Sinyal: ${data.symbol} ${data.direction}`,
+        `ICT ${statusLabel}: ${data.symbol} ${dir}`.trim(),
         data.status === "OPENED" ? "success" : "info"
     );
     loadActiveSignals();
+    if (data.status === "WATCHING") loadWatchlist();
     loadPerformance();
 });
 

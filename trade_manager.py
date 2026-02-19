@@ -235,7 +235,7 @@ class TradeManager:
                     logger.debug(f"⏭️ {signal['symbol']} {signal['direction']} zaten izleme listesinde, atlanıyor")
                 else:
                     logger.debug(f"⏭️ {signal['symbol']} ters yön ({w['direction']}) izlemede, {signal['direction']} atlanıyor")
-                return {"status": "ALREADY_WATCHING", "watch_id": w["id"], "symbol": signal["symbol"]}
+                return None
 
         watch_candles = WATCH_CONFIRM_CANDLES
         watch_id = add_to_watchlist(
@@ -262,7 +262,8 @@ class TradeManager:
         return {
             "status": "WATCHING",
             "watch_id": watch_id,
-            "symbol": signal["symbol"]
+            "symbol": signal["symbol"],
+            "direction": signal["direction"]
         }
 
     def check_open_trades(self):
