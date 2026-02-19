@@ -1432,12 +1432,15 @@ class ICTStrategy:
     #  BÖLÜM 17 — CONFLUENCE SCORING (Geriye Uyumlu)
     # =================================================================
 
-    def calculate_confluence(self, df, multi_tf_data=None):
+    def calculate_confluence(self, df, multi_tf_data=None, override_direction=None):
         """
         Tüm ICT bileşenlerini analiz edip confluent skor hesapla.
 
         Bu metod hem generate_signal() tarafından hem de
         izleme listesi onayı (check_watchlist) ve API tarafından kullanılır.
+
+        override_direction: generate_signal()'den çağrıldığında HTF-tabanlı
+        bias aktarılır. None ise LTF yapısından türetilir (API çağrıları).
 
         Sıralı Ağırlıklandırma:
           HTF Bias uyumu:       25 puan (veya -15 ceza)
@@ -1515,12 +1518,18 @@ class ICTStrategy:
 
         analysis["htf_bias_block"] = htf_bias_block
 
-        # === YÖN === 
-        direction = None
-        if structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
-            direction = "LONG"
-        elif structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
-            direction = "SHORT"
+        # === YÖN ===
+        # override_direction: generate_signal() HTF bias'ını aktarır.
+        # Bu sayede LTF WEAKENING_BULL + HTF LONG durumunda confluence
+        # doğru yönde (LONG) puanlanır.
+        if override_direction:
+            direction = override_direction
+        else:
+            direction = None
+            if structure["trend"] in ["BULLISH", "WEAKENING_BEAR"]:
+                direction = "LONG"
+            elif structure["trend"] in ["BEARISH", "WEAKENING_BULL"]:
+                direction = "SHORT"
         analysis["direction"] = direction
 
         # === MTF (1H) ONAY — GÜÇLENDİRİLMİŞ ===
@@ -1805,19 +1814,18 @@ class ICTStrategy:
             bonus += 5
 
         # Cezalar
-        if "DISPLACEMENT" not in components:
-            penalty += 10
+        # NOT: Confluence'da zaten uygulanan cezalar burada tekrarlanmaz
+        # (double-count engeli). Sadece confluence'da olmayan cezalar eklenir.
+        # Confluence'da zaten olan: NO_DISPLACEMENT(-8), RANGING(-15),
+        #   HTF_BIAS_BLOCK(-15), WEAKENING_TREND(-7)
         if "ORDER_BLOCK" not in components and "FVG" not in components:
             penalty += 8
         if "DISCOUNT_ZONE" not in components and "PREMIUM_ZONE" not in components and "OTE" not in components:
             penalty += 5
-        if analysis.get("htf_bias_block"):
-            penalty += 15
-        if analysis.get("is_ranging"):
-            penalty += 10
 
-        structure = analysis.get("structure", {})
-        if structure.get("trend") in ["WEAKENING_BULL", "WEAKENING_BEAR"]:
+        # HTF weak flag: WEAKENING variantlarda hafif ceza
+        htf_result = analysis.get("htf_result")
+        if htf_result and htf_result.get("weak"):
             penalty += 5
 
         # Session cezası zaten confluence'da uygulandığı için
@@ -1873,7 +1881,7 @@ class ICTStrategy:
         # Tamamen reddetmek yerine WATCH'a al — sweep olursa A+ setup olur.
         if bias == "LONG" and structure["trend"] == "BEARISH":
             # Potansiyel setup oluşum aşaması: Sweep + MSS ile 15m dönebilir
-            analysis = self.calculate_confluence(df, multi_tf_data)
+            analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
             confidence = self._calculate_confidence(analysis)
             # Sadece HTF güçlü + bazı bileşenler varsa WATCH'a al
             if confidence >= 25 and "HTF_CONFIRMATION" in analysis.get("components", []):
@@ -1886,7 +1894,7 @@ class ICTStrategy:
             logger.debug(f"🚫 {symbol}: LTF BEARISH vs HTF LONG → yetersiz çakışma")
             return None
         if bias == "SHORT" and structure["trend"] == "BULLISH":
-            analysis = self.calculate_confluence(df, multi_tf_data)
+            analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
             confidence = self._calculate_confidence(analysis)
             if confidence >= 25 and "HTF_CONFIRMATION" in analysis.get("components", []):
                 logger.debug(f"👀 {symbol}: LTF BULLISH vs HTF SHORT → Setup oluşum WATCH")
@@ -1904,7 +1912,7 @@ class ICTStrategy:
         if mtf_result and mtf_result.get("bias_conflict"):
             # 1H aktif olarak karşı yönde → dikkatli ol, WATCH olarak devam et
             logger.debug(f"⚠️ {symbol}: 1H bias uyumsuz ({mtf_result['mtf_trend']} vs {bias}), WATCH'a yönlendiriliyor")
-            analysis = self.calculate_confluence(df, multi_tf_data)
+            analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
             confidence = self._calculate_confidence(analysis)
             if confidence < 50:  # 1H conflict + düşük güven → sinyal yok
                 return None
@@ -1924,7 +1932,7 @@ class ICTStrategy:
         confirmation = self._find_post_sweep_confirmation(df, sweep, bias)
         if confirmation is None:
             # Sweep var ama displacement yok → WATCH
-            analysis = self.calculate_confluence(df, multi_tf_data)
+            analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
             confidence = self._calculate_confidence(analysis)
             return self._build_signal_dict(
                 symbol, bias, current_price, analysis, confidence,
@@ -1936,7 +1944,7 @@ class ICTStrategy:
         disp_idx = confirmation["displacement"]["index"]
         entry_fvg = self._find_displacement_fvg(df, disp_idx, bias)
         if entry_fvg is None:
-            analysis = self.calculate_confluence(df, multi_tf_data)
+            analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
             confidence = self._calculate_confidence(analysis)
             return self._build_signal_dict(
                 symbol, bias, current_price, analysis, confidence,
@@ -1999,14 +2007,14 @@ class ICTStrategy:
             price_at_fvg = entry_fvg["low"] * 0.998 <= current_price <= entry_fvg["high"] * 1.002
         entry_mode = "MARKET" if price_at_fvg else "LIMIT"
 
-        # Confluence ve confidence hesapla
-        analysis = self.calculate_confluence(df, multi_tf_data)
+        # Confluence ve confidence hesapla (HTF bias'ı override olarak gönder)
+        analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
         confluence_score = analysis["confluence_score"]
         confidence = self._calculate_confidence(analysis)
 
-        # Minimum eşikler
-        min_confluence = self.params.get("min_confluence_score", 70)
-        min_confidence = self.params.get("min_confidence", 75)
+        # Minimum eşikler (config varsayılanlarıyla tutarlı)
+        min_confluence = self.params.get("min_confluence_score", 60)
+        min_confidence = self.params.get("min_confidence", 65)
 
         session = self.get_session_info()
         components = analysis.get("components", [])
@@ -2078,7 +2086,7 @@ class ICTStrategy:
         Bu sayede optimizer yeterli veri toplayıp öğrenebilir.
         Sweep'li sinyaller hâlâ A/A+ tier olarak en yüksek öncelikli kalır.
         """
-        analysis = self.calculate_confluence(df, multi_tf_data)
+        analysis = self.calculate_confluence(df, multi_tf_data, override_direction=bias)
         confluence_score = analysis["confluence_score"]
         confidence = self._calculate_confidence(analysis)
         min_confluence = self.params.get("min_confluence_score", 60)

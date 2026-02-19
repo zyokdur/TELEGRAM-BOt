@@ -222,7 +222,7 @@ const pageTitles = {
     history: { icon: "fas fa-clock-rotate-left", text: "Geçmiş İşlemler" },
     performance: { icon: "fas fa-chart-pie", text: "Performans" },
     optimizer: { icon: "fas fa-brain", text: "Optimizasyon" },
-    backtest: { icon: "fas fa-flask", text: "Strateji Backtest" },
+
     forex: { icon: "fas fa-chart-line", text: "Forex & Altın ICT" },
     coindetail: { icon: "fas fa-magnifying-glass-chart", text: "Coin Detay Analizi" }
 };
@@ -245,7 +245,7 @@ function switchTab(tabName) {
     // Coin detay sekmesinde stats-row gizle (daha fazla alan)
     const statsRow = document.getElementById("statsRow");
     if (statsRow) {
-        statsRow.classList.toggle("hidden", tabName === "coindetail" || tabName === "backtest" || tabName === "forex");
+        statsRow.classList.toggle("hidden", tabName === "coindetail" || tabName === "forex");
     }
 
     // Auto-refresh: coindetail'den çıkınca durdur
@@ -267,8 +267,7 @@ function switchTab(tabName) {
         case "history": loadHistory(); break;
         case "optimizer": loadOptimization(); break;
         case "performance": loadPerformance(); break;
-        case "backtest": loadBacktestCoins(); break;
-        case "forex": loadForexKillZones(); break;
+        case "forex": initForexAutoScan(); break;
     }
 }
 
@@ -355,6 +354,7 @@ async function cancelSignal(signalId) {
 // =================== COINS ===================
 
 let allCoinsData = [];
+let currentCoinTfFilter = "all";
 
 async function loadCoins() {
     const data = await apiFetch("/api/coins");
@@ -374,13 +374,18 @@ async function loadCoins() {
     renderCoinsTable(allCoinsData);
 }
 
+function filterCoinsByTf(tf) {
+    currentCoinTfFilter = tf;
+    document.querySelectorAll(".coin-tf-btn").forEach(b => b.classList.toggle("active", b.dataset.filter === tf));
+    filterCoins();
+}
+
 function filterCoins() {
     const query = document.getElementById("coinSearchInput").value.toUpperCase().trim();
-    if (!query) {
-        renderCoinsTable(allCoinsData);
-        return;
+    let filtered = allCoinsData;
+    if (query) {
+        filtered = filtered.filter(c => c.symbol.toUpperCase().includes(query));
     }
-    const filtered = allCoinsData.filter(c => c.symbol.toUpperCase().includes(query));
     renderCoinsTable(filtered);
 }
 
@@ -393,17 +398,17 @@ function renderCoinsTable(coins) {
                 <div class="empty-state">
                     <div class="empty-icon"><i class="fas fa-satellite-dish"></i></div>
                     <p class="empty-title">Coin bulunamadı</p>
-                    <p class="empty-desc">OKX'ten $5M+ hacimli coinler yükleniyor...</p>
+                    <p class="empty-desc">OKX'ten yüksek hacimli coinler yükleniyor...</p>
                 </div>
             </td></tr>`;
         return;
     }
 
+    const maxVol = coins[0]?.volume_usdt || 1;
     tbody.innerHTML = coins.map((coin, index) => {
         const parts = coin.symbol.split("-");
         const coinName = parts[0] || coin.symbol;
         const pairName = parts[1] || "USDT";
-        const coinDisplay = `<div class="coin-symbol"><span class="coin-name">${coinName}</span><span class="coin-pair">/${pairName}</span></div>`;
 
         const price = coin.last_price || 0;
         const change = coin.change_pct || 0;
@@ -417,25 +422,30 @@ function renderCoinsTable(coins) {
             : volume >= 1_000_000
             ? `$${(volume / 1_000_000).toFixed(2)}M`
             : `$${volume.toLocaleString("tr-TR")}`;
+        const volBarPct = Math.min(100, (volume / maxVol) * 100);
 
-        const volBarPct = Math.min(100, (volume / (coins[0]?.volume_usdt || 1)) * 100);
-
-        return `<tr class="coin-row-clickable" ondblclick="openCoinDetail('${coin.symbol}')" title="Çift tıkla: Detaylı Teknik Analiz">
-            <td style="color:var(--text-muted);font-size:11px">${index + 1}</td>
-            <td>${coinDisplay}</td>
-            <td style="font-weight:600">${formatPrice(price)}</td>
-            <td><span class="${changeClass}"><i class="fas ${changeIcon}" style="font-size:12px;margin-right:3px"></i>${changeText}</span></td>
-            <td>
-                <div class="volume-cell">
-                    <span class="vol-text">${volText}</span>
-                    <div class="vol-track">
-                        <div class="vol-fill" style="width:${volBarPct}%"></div>
+        return `<tr class="coin-row" onclick="openCoinDetail('${coin.symbol}')" title="Detaylı Teknik Analiz">
+            <td class="col-rank">${index + 1}</td>
+            <td class="col-coin">
+                <div class="coin-cell">
+                    <div class="coin-avatar">${coinName.substring(0, 2)}</div>
+                    <div class="coin-symbol">
+                        <span class="coin-name">${coinName}</span>
+                        <span class="coin-pair">${pairName}</span>
                     </div>
                 </div>
             </td>
-            <td>
+            <td class="col-price">${formatPrice(price)}</td>
+            <td class="col-change"><span class="${changeClass}"><i class="fas ${changeIcon}"></i>${changeText}</span></td>
+            <td class="col-volume">
+                <div class="volume-cell">
+                    <span class="vol-text">${volText}</span>
+                    <div class="vol-track"><div class="vol-fill" style="width:${volBarPct}%"></div></div>
+                </div>
+            </td>
+            <td class="col-action">
                 <button class="btn-analyze" onclick="event.stopPropagation(); openCoinDetail('${coin.symbol}')">
-                    <i class="fas fa-magnifying-glass-chart"></i> Detay
+                    <i class="fas fa-magnifying-glass-chart"></i>
                 </button>
             </td>
         </tr>`;
@@ -807,6 +817,8 @@ async function loadRegime() {
     const data = await apiFetch("/api/regime");
     if (!data) return;
 
+    const isUnknown = data.regime === "UNKNOWN";
+
     updateRegimeTopbar(data);
 
     // Rejim ana kartı
@@ -822,7 +834,10 @@ async function loadRegime() {
     const btcDetails = data.btc_details || {};
     const btcBias = btcDetails.bias || "NEUTRAL";
     const btcEl = document.getElementById("regimeBtcTrend");
-    if (btcBias === "LONG") {
+    if (isUnknown || btcBias === "UNKNOWN") {
+        btcEl.innerHTML = `<i class="fas fa-clock"></i> Veri Bekleniyor`;
+        btcEl.style.color = "var(--text-muted)";
+    } else if (btcBias === "LONG") {
         btcEl.innerHTML = `<i class="fas fa-arrow-up"></i> Yükseliyor (${btcDetails.strength || ""})`;
         btcEl.style.color = "var(--green)";
     } else if (btcBias === "SHORT") {
@@ -835,17 +850,27 @@ async function loadRegime() {
 
     // BTC.D
     const btcD = data.btc_dominance || {};
-    const btcdMeta = BTCD_LABELS[btcD.direction] || BTCD_LABELS.NEUTRAL;
     const btcDEl = document.getElementById("regimeBtcD");
-    btcDEl.textContent = btcdMeta.text;
-    btcDEl.style.color = btcdMeta.color;
+    if (isUnknown || btcD.direction === "UNKNOWN") {
+        btcDEl.textContent = "Veri Bekleniyor";
+        btcDEl.style.color = "var(--text-muted)";
+    } else {
+        const btcdMeta = BTCD_LABELS[btcD.direction] || BTCD_LABELS.NEUTRAL;
+        btcDEl.textContent = btcdMeta.text;
+        btcDEl.style.color = btcdMeta.color;
+    }
 
     // Para Akışı
     const flow = data.usdt_flow || {};
-    const flowMeta = FLOW_LABELS[flow.direction] || FLOW_LABELS.NEUTRAL;
     const flowEl = document.getElementById("regimeFlow");
-    flowEl.innerHTML = `<i class="fas ${flowMeta.icon}"></i> ${flowMeta.text}`;
-    flowEl.style.color = flowMeta.color;
+    if (isUnknown || flow.direction === "UNKNOWN") {
+        flowEl.innerHTML = `<i class="fas fa-clock"></i> Veri Bekleniyor`;
+        flowEl.style.color = "var(--text-muted)";
+    } else {
+        const flowMeta = FLOW_LABELS[flow.direction] || FLOW_LABELS.NEUTRAL;
+        flowEl.innerHTML = `<i class="fas ${flowMeta.icon}"></i> ${flowMeta.text}`;
+        flowEl.style.color = flowMeta.color;
+    }
 
     // Fırsat listesi
     const longList = (data.long_candidates || []).map(s => s.split("-")[0]);
@@ -911,6 +936,22 @@ async function loadRegime() {
             <td>${statusBadge}</td>
         </tr>`;
     }).join("");
+}
+
+async function refreshRegimeManual() {
+    showToast("Rejim analizi başlatılıyor...", "info");
+    try {
+        const resp = await fetch("/api/regime/refresh", { method: "POST" });
+        const data = await resp.json();
+        if (data.error) {
+            showToast(`Rejim hatası: ${data.error}`, "error");
+            return;
+        }
+        showToast("Rejim analizi tamamlandı!", "success");
+        loadRegime();
+    } catch (e) {
+        showToast("Rejim analizi başarısız", "error");
+    }
 }
 
 // =================== STATS UPDATE ===================
@@ -1008,7 +1049,7 @@ async function openCoinDetail(symbol) {
     document.getElementById("orderbookSection").style.display = "none";
     document.getElementById("verdictScoreBar").style.display = "none";
     document.getElementById("verdictWarnings").innerHTML = "";
-    document.getElementById("scenarioSection").style.display = "none";
+    document.getElementById("marketDataSection").style.display = "none";
 
     const parts = symbol.split("-");
     document.getElementById("modalCoinName").textContent = `${parts[0]}/${parts[1] || "USDT"}`;
@@ -1057,12 +1098,48 @@ async function openCoinDetail(symbol) {
     scoreBar.style.display = "block";
     const bullTotal = ov.bull_total || 0;
     const bearTotal = ov.bear_total || 0;
-    const maxScore = 50;
+    const maxScore = 100;
     document.getElementById("scoreFillBull").style.width = `${Math.min(bullTotal / maxScore * 50, 50)}%`;
     document.getElementById("scoreFillBear").style.width = `${Math.min(bearTotal / maxScore * 50, 50)}%`;
     const netScore = ov.net_score || 0;
     const pointerPos = 50 + (netScore / maxScore * 50);
     document.getElementById("scorePointer").style.left = `${Math.min(Math.max(pointerPos, 2), 98)}%`;
+
+    // Regime / Momentum / Confluence meta chips
+    const metaEl = document.getElementById("verdictMeta");
+    if (ov.market_regime || ov.momentum || ov.tf_confluence) {
+        metaEl.style.display = "flex";
+
+        const regimeIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
+        const regimeColors = {"Trend piyasası": "var(--green)", "Yatay piyasa": "var(--yellow, #f0ad4e)", "Normal": "var(--text-muted)"};
+        const regime = ov.market_regime || "Normal";
+        document.getElementById("metaRegime").innerHTML = `${regimeIcons[regime] || '🔄'} ${regime}`;
+        document.getElementById("metaRegime").style.borderColor = regimeColors[regime] || "var(--text-muted)";
+
+        const momLabels = {
+            "BULL_ACCELERATING": "🚀 Boğa Hızlanıyor", "BEAR_ACCELERATING": "🚀 Ayı Hızlanıyor",
+            "BULL_FADING": "📉 Boğa Zayıflıyor", "BEAR_FADING": "📉 Ayı Zayıflıyor",
+            "BULL_REVERSAL_RISK": "🔄 Dönüş Riski", "BEAR_REVERSAL_RISK": "🔄 Dip Oluşumu",
+            "NEUTRAL": "➖ Nötr İvme"
+        };
+        const momColors = {
+            "BULL_ACCELERATING": "var(--green)", "BEAR_ACCELERATING": "var(--red)",
+            "BULL_FADING": "var(--yellow, #f0ad4e)", "BEAR_FADING": "var(--yellow, #f0ad4e)",
+            "BULL_REVERSAL_RISK": "var(--red)", "BEAR_REVERSAL_RISK": "var(--green)",
+            "NEUTRAL": "var(--text-muted)"
+        };
+        const mom = ov.momentum || "NEUTRAL";
+        document.getElementById("metaMomentum").innerHTML = momLabels[mom] || "➖ Nötr";
+        document.getElementById("metaMomentum").style.borderColor = momColors[mom] || "var(--text-muted)";
+
+        const confLabels = {"ALL_BULL": "✅ Tam Boğa Uyumu", "ALL_BEAR": "✅ Tam Ayı Uyumu", "MIXED": "⚡ Karışık TF"};
+        const confColors = {"ALL_BULL": "var(--green)", "ALL_BEAR": "var(--red)", "MIXED": "var(--yellow, #f0ad4e)"};
+        const conf = ov.tf_confluence || "MIXED";
+        document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
+        document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+    } else {
+        metaEl.style.display = "none";
+    }
 
     // Warnings
     const warningsEl = document.getElementById("verdictWarnings");
@@ -1097,116 +1174,88 @@ async function openCoinDetail(symbol) {
 
     renderModalTf("15m");
 
-    // Render Trading Scenario
-    renderScenario(data.scenario);
+    // Render Market Data
+    renderMarketData(data.market_data);
 }
 
-// =================== AI TRADING SENARYOSU ===================
+// =================== PİYASA VERİLERİ ===================
 
-function renderScenario(scenario) {
-    const section = document.getElementById("scenarioSection");
-    const container = document.getElementById("scenarioContainer");
-    if (!scenario) {
+function renderMarketData(md) {
+    const section = document.getElementById("marketDataSection");
+    if (!md) {
+        section.style.display = "none";
+        return;
+    }
+
+    const hasFunding = md.funding && md.funding.current != null;
+    const hasOI = md.open_interest && md.open_interest.usdt;
+    const hasLSR = md.long_short_ratio && Object.keys(md.long_short_ratio).length > 0;
+
+    if (!hasFunding && !hasOI && !hasLSR) {
         section.style.display = "none";
         return;
     }
     section.style.display = "block";
 
-    // Badge
-    const badge = document.getElementById("scenarioBadge");
-    const recMap = {
-        "LONG": { text: "LONG ÖNCELİKLİ", cls: "bull" },
-        "LONG_CAUTIOUS": { text: "HAFİF LONG", cls: "weak-bull" },
-        "SHORT": { text: "SHORT ÖNCELİKLİ", cls: "bear" },
-        "SHORT_CAUTIOUS": { text: "HAFİF SHORT", cls: "weak-bear" },
-        "WAIT": { text: "BEKLE", cls: "neutral" }
-    };
-    const rec = recMap[scenario.recommended] || recMap["WAIT"];
-    badge.textContent = rec.text;
-    badge.className = `scenario-badge ${rec.cls}`;
-
-    // Strategy lines
-    const stratEl = document.getElementById("scenarioStrategy");
-    stratEl.innerHTML = scenario.strategy.map(line => `<div class="strat-line">${line}</div>`).join("");
-
-    // Wait conditions
-    const waitEl = document.getElementById("scenarioWait");
-    if (scenario.wait_conditions && scenario.wait_conditions.length > 0) {
-        waitEl.innerHTML = `<div class="wait-header"><i class="fas fa-clock"></i> Giriş Onay Koşulları</div>` +
-            scenario.wait_conditions.map(line => `<div class="wait-line">${line}</div>`).join("");
-        waitEl.style.display = "block";
+    // Fonlama oranı
+    if (hasFunding) {
+        const f = md.funding;
+        document.getElementById("mdFunding").style.display = "block";
+        const fBadge = document.getElementById("fundingBadge");
+        fBadge.textContent = f.label || "--";
+        fBadge.className = `ind-badge ${getSignalClass(f.signal)}`;
+        document.getElementById("fundingCurrent").textContent = `${f.current}%`;
+        document.getElementById("fundingNext").textContent = `${f.next}%`;
+        document.getElementById("fundingTime").textContent = f.next_time || "--";
+        document.getElementById("fundingDesc").textContent = f.desc || "";
     } else {
-        waitEl.style.display = "none";
+        document.getElementById("mdFunding").style.display = "none";
     }
 
-    // Key Levels
-    const levelsEl = document.getElementById("scenarioLevels");
-    if (scenario.key_levels && scenario.key_levels.length > 0) {
-        let levelsHtml = `<div class="levels-header"><i class="fas fa-map-marker-alt"></i> Anahtar Seviyeler</div>`;
-        levelsHtml += `<div class="levels-grid">`;
-        scenario.key_levels.forEach(level => {
-            const isAbove = level.price_raw > scenario.current_price;
-            const dist = ((level.price_raw - scenario.current_price) / scenario.current_price * 100).toFixed(2);
-            const distStr = isAbove ? `+${dist}%` : `${dist}%`;
-            const typeClass = level.type === "resistance" ? "resistance" : "support";
-            const isCurrent = Math.abs(level.price_raw - scenario.current_price) / scenario.current_price < 0.001;
-            levelsHtml += `<div class="level-item ${typeClass} ${isCurrent ? 'current' : ''}">
-                <span class="level-name">${level.name}</span>
-                <span class="level-price">${level.price}</span>
-                <span class="level-dist ${isAbove ? 'above' : 'below'}">${distStr}</span>
+    // Açık Faiz
+    if (hasOI) {
+        const oi = md.open_interest;
+        document.getElementById("mdOI").style.display = "block";
+        const oiBadge = document.getElementById("oiBadge");
+        oiBadge.textContent = oi.display || "--";
+        oiBadge.className = `ind-badge ${getSignalClass(oi.signal)}`;
+        document.getElementById("oiValue").textContent = oi.display || "--";
+        document.getElementById("oiDesc").textContent = oi.desc || "";
+    } else {
+        document.getElementById("mdOI").style.display = "none";
+    }
+
+    // Long/Short Ratio
+    if (hasLSR) {
+        document.getElementById("mdLSR").style.display = "block";
+        const periodsEl = document.getElementById("lsrPeriods");
+        const periodLabels = { "5m": "5 Dakika", "1H": "1 Saat", "1D": "1 Gün" };
+        let html = "";
+        for (const [key, val] of Object.entries(md.long_short_ratio)) {
+            const label = periodLabels[key] || key;
+            const longW = val.long_pct || 50;
+            const shortW = val.short_pct || 50;
+            html += `
+            <div class="lsr-period">
+                <div class="lsr-period-head">
+                    <span class="lsr-period-label">${label}</span>
+                    <span class="ind-badge ${getSignalClass(val.signal)}">${val.label}</span>
+                </div>
+                <div class="lsr-bar">
+                    <div class="lsr-long" style="width:${longW}%">
+                        <span>L ${longW}%</span>
+                    </div>
+                    <div class="lsr-short" style="width:${shortW}%">
+                        <span>S ${shortW}%</span>
+                    </div>
+                </div>
+                <p class="ind-desc">${val.desc || ""}</p>
             </div>`;
-        });
-        // Current price marker
-        levelsHtml += `<div class="level-item current-price">
-            <span class="level-name">📍 Mevcut Fiyat</span>
-            <span class="level-price">${scenario.current_price_fmt}</span>
-            <span class="level-dist">--</span>
-        </div>`;
-        levelsHtml += `</div>`;
-        levelsEl.innerHTML = levelsHtml;
-        levelsEl.style.display = "block";
+        }
+        periodsEl.innerHTML = html;
     } else {
-        levelsEl.style.display = "none";
+        document.getElementById("mdLSR").style.display = "none";
     }
-
-    // Long Scenario
-    renderScenarioCard("longBody", scenario.long, "longQuality");
-
-    // Short Scenario
-    renderScenarioCard("shortBody", scenario.short, "shortQuality");
-}
-
-function renderScenarioCard(bodyId, scenarioData, qualityId) {
-    const body = document.getElementById(bodyId);
-    const qualityEl = document.getElementById(qualityId);
-
-    if (!scenarioData) {
-        body.innerHTML = "<p>Veri yok</p>";
-        return;
-    }
-
-    const quality = scenarioData.quality || 0;
-    qualityEl.textContent = `${Math.min(quality, 100)}%`;
-
-    if (quality >= 60) {
-        qualityEl.className = "scenario-quality high";
-    } else if (quality >= 30) {
-        qualityEl.className = "scenario-quality medium";
-    } else {
-        qualityEl.className = "scenario-quality low";
-    }
-
-    let html = "";
-    (scenarioData.sections || []).forEach(section => {
-        html += `<div class="scenario-section">`;
-        html += `<div class="scenario-section-title">${section.title}</div>`;
-        (section.lines || []).forEach(line => {
-            html += `<div class="scenario-line">${line}</div>`;
-        });
-        html += `</div>`;
-    });
-
-    body.innerHTML = html;
 }
 
 function switchModalTf(tf) {
@@ -1235,28 +1284,115 @@ function renderModalTf(tf) {
 
     const netScore = tfData.net_score || 0;
     const confidence = tfData.confidence || 0;
+    const direction = tfData.direction || "NONE";
+    const dirLabel = direction === "LONG" ? "📈 LONG" : direction === "SHORT" ? "📉 SHORT" : "⏳ YÖN YOK";
 
     verdictRow.innerHTML = `
         <span class="tf-verdict-chip ${chipClass}">${verdictEmoji} ${tfData.verdict_label || tfData.verdict}</span>
-        <span class="tf-verdict-text">Skor: ${netScore > 0 ? '+' : ''}${netScore} | Güven: ${confidence}/100</span>
+        <span class="tf-direction-chip ${direction.toLowerCase()}">${dirLabel}</span>
+        <span class="tf-verdict-text">Skor: ${netScore > 0 ? '+' : ''}${netScore} | Güven: ${confidence}</span>
         <span class="tf-verdict-text">Boğa: ${tfData.bull_score || 0} | Ayı: ${tfData.bear_score || 0}</span>
     `;
 
-    // Indicator Score Summary (mini bar chart)
-    const scores = tfData.indicator_scores || {};
-    const scoreNames = { trend: "Trend", adx: "ADX", macd: "MACD", rsi: "RSI", stoch_rsi: "StRSI",
-                         volume: "Hacim", obv: "OBV", bollinger: "BB", fvg: "FVG", divergence: "Div" };
-    const summaryEl = document.getElementById("indScoreSummary");
-    let summaryHtml = '<div class="score-chips">';
-    for (const [key, name] of Object.entries(scoreNames)) {
-        const s = scores[key];
-        if (s) {
-            const cls = s.direction === "BULL" ? "score-bull" : "score-bear";
-            summaryHtml += `<span class="score-chip ${cls}">${name}: ${s.direction === "BULL" ? "+" : "-"}${s.score}</span>`;
-        }
+    // ═══ Pillar Score Summary (3 sütun + destek) ═══
+    const pillars = tfData.pillar_scores || {};
+    const summaryEl = document.getElementById("pillarScoreSummary");
+    let summaryHtml = '<div class="pillar-bars">';
+    const pillarConfig = [
+        { key: "donchian", icon: "fas fa-arrows-alt-v", color: "#3498db" },
+        { key: "vwap_dpo", icon: "fas fa-balance-scale", color: "#9b59b6" },
+        { key: "money_flow", icon: "fas fa-money-bill-wave", color: "#2ecc71" },
+        { key: "support_adj", icon: "fas fa-info-circle", color: "#95a5a6" },
+    ];
+    for (const cfg of pillarConfig) {
+        const p = pillars[cfg.key];
+        if (!p) continue;
+        const pct = Math.min(Math.abs(p.score) / p.max * 100, 100);
+        const isNeg = p.score < 0;
+        const scoreText = cfg.key === "support_adj" ? (p.score >= 0 ? `+${p.score}` : `${p.score}`) : `${p.score}/${p.max}`;
+        const barColor = isNeg ? "var(--red)" : cfg.color;
+        const flowDir = p.direction ? (p.direction === "BULL" ? " 🐂" : p.direction === "BEAR" ? " 🐻" : "") : "";
+        summaryHtml += `
+            <div class="pillar-bar-item">
+                <div class="pillar-label"><i class="${cfg.icon}"></i> ${p.label}${flowDir}</div>
+                <div class="pillar-track">
+                    <div class="pillar-fill" style="width:${pct}%;background:${barColor}"></div>
+                </div>
+                <div class="pillar-score">${scoreText}</div>
+            </div>`;
     }
     summaryHtml += '</div>';
     summaryEl.innerHTML = summaryHtml;
+
+    // ═══ ANA STRATEJİ: Donchian Channel ═══
+    const dc = tfData.donchian || {};
+    const dcBadge = document.getElementById("donchianBadge");
+    dcBadge.textContent = dc.label || "--";
+    dcBadge.className = `ind-badge ${getSignalClass(dc.signal)}`;
+    document.getElementById("dcUpper").textContent = dc.upper != null ? formatPrice(dc.upper) : "--";
+    document.getElementById("dcMiddle").textContent = dc.middle != null ? formatPrice(dc.middle) : "--";
+    document.getElementById("dcLower").textContent = dc.lower != null ? formatPrice(dc.lower) : "--";
+    document.getElementById("dcWidth").textContent = dc.width_pct != null ? `%${dc.width_pct.toFixed(2)}` : "--";
+    document.getElementById("donchianDesc").textContent = dc.desc || "";
+    // Position dot
+    const dcDot = document.getElementById("dcPositionDot");
+    if (dc.upper != null && dc.lower != null && dc.upper !== dc.lower) {
+        const currentPrice = coinDetailData?.price?.last || 0;
+        const dcPct = ((currentPrice - dc.lower) / (dc.upper - dc.lower)) * 100;
+        dcDot.style.left = `${Math.min(Math.max(dcPct, 2), 98)}%`;
+        dcDot.style.display = "block";
+        dcDot.style.backgroundColor = dcPct > 80 ? "var(--green)" : dcPct < 20 ? "var(--red)" : "var(--blue)";
+    } else {
+        dcDot.style.display = "none";
+    }
+
+    // ═══ ANA STRATEJİ: VWAP + DPO ═══
+    const vd = tfData.vwap_dpo || {};
+    const vdBadge = document.getElementById("vwapDpoBadge");
+    vdBadge.textContent = vd.label || "--";
+    vdBadge.className = `ind-badge ${getSignalClass(vd.signal)}`;
+    document.getElementById("vwapValue").textContent = vd.vwap != null ? formatPrice(vd.vwap) : "--";
+    document.getElementById("vwapDeviation").textContent = vd.vwap_dev != null ? `${vd.vwap_dev > 0 ? '+' : ''}${vd.vwap_dev.toFixed(2)}σ` : "--";
+    const vwapDevEl = document.getElementById("vwapDeviation");
+    if (vd.vwap_dev != null) {
+        vwapDevEl.style.color = Math.abs(vd.vwap_dev) > 2 ? "var(--red)" : Math.abs(vd.vwap_dev) < 0.5 ? "var(--green)" : "var(--text-primary)";
+    }
+    document.getElementById("dpoValue").textContent = vd.dpo != null ? vd.dpo.toFixed(4) : "--";
+    document.getElementById("vwapDpoDesc").textContent = vd.desc || "";
+
+    // ═══ ANA STRATEJİ: CMF ═══
+    const cmf = tfData.cmf || {};
+    const cmfBadge = document.getElementById("cmfBadge");
+    cmfBadge.textContent = cmf.label || "--";
+    cmfBadge.className = `ind-badge ${getSignalClass(cmf.signal)}`;
+    const cmfVal = cmf.value;
+    document.getElementById("cmfValue").textContent = cmfVal != null ? cmfVal.toFixed(4) : "--";
+    document.getElementById("cmfValue").style.color = cmfVal > 0.05 ? "var(--green)" : cmfVal < -0.05 ? "var(--red)" : "var(--text-primary)";
+    // CMF bar
+    const cmfFill = document.getElementById("cmfBarFill");
+    if (cmfVal != null) {
+        const cmfPct = (cmfVal + 0.5) / 1.0 * 100; // -0.5 to 0.5 range
+        cmfFill.style.width = `${Math.min(Math.max(cmfPct, 2), 98)}%`;
+        cmfFill.style.backgroundColor = cmfVal > 0.05 ? "var(--green)" : cmfVal < -0.05 ? "var(--red)" : "var(--text-muted)";
+    }
+    document.getElementById("cmfDesc").textContent = cmf.desc || "";
+
+    // ═══ ANA STRATEJİ: MFI ═══
+    const mfi = tfData.mfi || {};
+    const mfiBadge = document.getElementById("mfiBadge");
+    mfiBadge.textContent = mfi.label || "--";
+    mfiBadge.className = `ind-badge ${getSignalClass(mfi.signal)}`;
+    const mfiVal = mfi.value;
+    document.getElementById("mfiValue").textContent = mfiVal != null ? mfiVal.toFixed(1) : "--";
+    document.getElementById("mfiValue").style.color = mfiVal > 80 ? "var(--red)" : mfiVal < 20 ? "var(--green)" : "var(--text-primary)";
+    const mfiNeedle = document.getElementById("mfiNeedle");
+    if (mfiVal != null) {
+        mfiNeedle.style.left = `${Math.min(Math.max(mfiVal, 0), 100)}%`;
+        mfiNeedle.style.display = "block";
+    } else {
+        mfiNeedle.style.display = "none";
+    }
+    document.getElementById("mfiDesc").textContent = mfi.desc || "";
 
     // RSI
     const rsi = tfData.rsi || {};
@@ -1319,6 +1455,8 @@ function renderModalTf(tf) {
         bbPos.style.left = `${Math.min(Math.max(bb.pct_b, 0), 100)}%`;
         bbPos.style.display = "block";
         bbPos.style.backgroundColor = bb.pct_b > 80 ? "var(--red)" : bb.pct_b < 20 ? "var(--green)" : "var(--blue)";
+    } else {
+        bbPos.style.display = "none";
     }
 
     // ADX
@@ -1392,64 +1530,27 @@ function renderModalTf(tf) {
     const divClass = div.type === "BULLISH" ? "bull" : div.type === "BEARISH" ? "bear" : "neutral";
     divBadge.className = `ind-badge ${divClass}`;
     document.getElementById("divDesc").textContent = div.desc || "";
-
-    // Trend / EMA
-    const trendBadge = document.getElementById("trendBadge");
-    trendBadge.textContent = tfData.trend_label || tfData.trend || "--";
-    const trendClass = {
-        "BULLISH": "bull", "BEARISH": "bear", "WEAKENING_BEAR": "weak-bull",
-        "WEAKENING_BULL": "weak-bear", "UNKNOWN": "neutral"
-    }[tfData.trend] || "neutral";
-    trendBadge.className = `ind-badge ${trendClass}`;
-
-    const ema = tfData.ema || {};
-    document.getElementById("ema8Val").textContent = ema.ema8 != null ? formatPrice(ema.ema8) : "--";
-    document.getElementById("ema21Val").textContent = ema.ema21 != null ? formatPrice(ema.ema21) : "--";
-    document.getElementById("ema50Val").textContent = ema.ema50 != null ? formatPrice(ema.ema50) : "--";
-    document.getElementById("ema200Val").textContent = ema.ema200 != null ? formatPrice(ema.ema200) : "--";
-
-    // EMA colors
-    if (ema.ema8 != null && ema.ema21 != null) {
-        document.getElementById("ema8Val").style.color = ema.ema8 > ema.ema21 ? "var(--green)" : "var(--red)";
-        document.getElementById("ema21Val").style.color = ema.ema21 > (ema.ema50 || 0) ? "var(--green)" : "var(--red)";
-    }
-    if (ema.ema50 != null) {
-        document.getElementById("ema50Val").style.color = currentPrice > ema.ema50 ? "var(--green)" : "var(--red)";
-    }
-    if (ema.ema200 != null) {
-        document.getElementById("ema200Val").style.color = currentPrice > ema.ema200 ? "var(--green)" : "var(--red)";
-    }
-
-    // EMA Order badge
-    const emaOrderBadge = document.getElementById("emaOrderBadge");
-    if (ema.order === "BULL") {
-        emaOrderBadge.textContent = "EMA Sıralaması: Boğa (8>21>50)";
-        emaOrderBadge.className = "ema-order-badge bull";
-    } else if (ema.order === "BEAR") {
-        emaOrderBadge.textContent = "EMA Sıralaması: Ayı (8<21<50)";
-        emaOrderBadge.className = "ema-order-badge bear";
-    } else {
-        emaOrderBadge.textContent = "EMA Sıralaması: Karışık";
-        emaOrderBadge.className = "ema-order-badge neutral";
-    }
-
-    document.getElementById("trendDesc").textContent = tfData.trend_desc || "";
 }
 
 function getSignalClass(signal) {
     switch (signal) {
-        case "BULLISH": return "bull";
-        case "BEARISH": return "bear";
-        case "WEAKENING_BULL": return "weak-bear";
-        case "WEAKENING_BEAR": return "weak-bull";
+        case "BULLISH": case "STRONG_BULLISH": return "bull";
+        case "BEARISH": case "STRONG_BEARISH": return "bear";
+        case "OVERBOUGHT": return "bear";
+        case "OVERSOLD": return "bull";
+        case "IDEAL_ENTRY": case "FAIR_ENTRY": case "BOTTOM_FORMING": return "bull";
+        case "TOP_FORMING": case "OVEREXTENDED_BULL": case "OVEREXTENDED_BEAR": case "STRETCHING_BULL": case "STRETCHING_BEAR": return "weak-bear";
+        case "WEAKENING_BULL": return "weak-bull";
+        case "WEAKENING_BEAR": return "weak-bear";
         default: return "neutral";
     }
 }
 
 function getSignalColor(signal) {
     switch (signal) {
-        case "BULLISH": return "var(--green)";
-        case "BEARISH": return "var(--red)";
+        case "BULLISH": case "STRONG_BULLISH": case "IDEAL_ENTRY": case "BOTTOM_FORMING": case "OVERSOLD": return "var(--green)";
+        case "BEARISH": case "STRONG_BEARISH": case "OVERBOUGHT": case "TOP_FORMING": return "var(--red)";
+        case "OVEREXTENDED_BULL": case "OVEREXTENDED_BEAR": case "STRETCHING_BULL": case "STRETCHING_BEAR": return "var(--yellow, #f0ad4e)";
         default: return "var(--text-primary)";
     }
 }
@@ -1460,7 +1561,6 @@ let autoRefreshActive = false;
 let autoRefreshInterval = null;
 let autoRefreshCountdown = 30;
 let autoRefreshCountdownInterval = null;
-let lastScenarioRecommended = null;
 
 function toggleAutoRefresh() {
     if (autoRefreshActive) {
@@ -1474,7 +1574,6 @@ function startAutoRefresh() {
     if (!coinDetailData?._symbol) return;
     autoRefreshActive = true;
     autoRefreshCountdown = 30;
-    lastScenarioRecommended = coinDetailData?.scenario?.recommended || null;
 
     const toggle = document.getElementById("autoRefreshToggle");
     toggle.classList.add("active");
@@ -1514,7 +1613,6 @@ async function refreshCoinDetail() {
         const data = await apiFetch(`/api/coin-detail/${coinDetailData._symbol}`);
         if (!data || data.error) return;
 
-        const oldRec = coinDetailData?.scenario?.recommended;
         coinDetailData = data;
         coinDetailData._symbol = coinDetailData._symbol || data.symbol;
 
@@ -1536,264 +1634,244 @@ async function refreshCoinDetail() {
         // Score bar
         const bullTotal = ov.bull_total || 0;
         const bearTotal = ov.bear_total || 0;
-        const maxScore = 50;
+        const maxScore = 100;
         document.getElementById("scoreFillBull").style.width = `${Math.min(bullTotal / maxScore * 50, 50)}%`;
         document.getElementById("scoreFillBear").style.width = `${Math.min(bearTotal / maxScore * 50, 50)}%`;
         const netScore = ov.net_score || 0;
         const pointerPos = 50 + (netScore / maxScore * 50);
         document.getElementById("scorePointer").style.left = `${Math.min(Math.max(pointerPos, 2), 98)}%`;
 
+        // Meta chips (Regime / Momentum / Confluence)
+        const metaEl = document.getElementById("verdictMeta");
+        if (ov.market_regime || ov.momentum || ov.tf_confluence) {
+            metaEl.style.display = "flex";
+            const regimeIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
+            const regimeColors = {"Trend piyasası": "var(--green)", "Yatay piyasa": "var(--yellow, #f0ad4e)", "Normal": "var(--text-muted)"};
+            const regime = ov.market_regime || "Normal";
+            document.getElementById("metaRegime").innerHTML = `${regimeIcons[regime] || '🔄'} ${regime}`;
+            document.getElementById("metaRegime").style.borderColor = regimeColors[regime] || "var(--text-muted)";
+
+            const momLabels = {"BULL_ACCELERATING": "🚀 Boğa Hızlanıyor", "BEAR_ACCELERATING": "🚀 Ayı Hızlanıyor", "BULL_FADING": "📉 Boğa Zayıflıyor", "BEAR_FADING": "📉 Ayı Zayıflıyor", "BULL_REVERSAL_RISK": "🔄 Dönüş Riski", "BEAR_REVERSAL_RISK": "🔄 Dip Oluşumu", "NEUTRAL": "➖ Nötr İvme"};
+            const momColors = {"BULL_ACCELERATING": "var(--green)", "BEAR_ACCELERATING": "var(--red)", "BULL_FADING": "var(--yellow, #f0ad4e)", "BEAR_FADING": "var(--yellow, #f0ad4e)", "BULL_REVERSAL_RISK": "var(--red)", "BEAR_REVERSAL_RISK": "var(--green)", "NEUTRAL": "var(--text-muted)"};
+            const mom = ov.momentum || "NEUTRAL";
+            document.getElementById("metaMomentum").innerHTML = momLabels[mom] || "➖ Nötr";
+            document.getElementById("metaMomentum").style.borderColor = momColors[mom] || "var(--text-muted)";
+
+            const confLabels = {"ALL_BULL": "✅ Tam Boğa Uyumu", "ALL_BEAR": "✅ Tam Ayı Uyumu", "MIXED": "⚡ Karışık TF"};
+            const confColors = {"ALL_BULL": "var(--green)", "ALL_BEAR": "var(--red)", "MIXED": "var(--yellow, #f0ad4e)"};
+            const conf = ov.tf_confluence || "MIXED";
+            document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
+            document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+        } else {
+            metaEl.style.display = "none";
+        }
+
         // Warnings
         if (ov.warnings && ov.warnings.length > 0) {
             document.getElementById("verdictWarnings").innerHTML = ov.warnings.map(w => `<div class="warning-item">${w}</div>`).join("");
+        } else {
+            document.getElementById("verdictWarnings").innerHTML = "";
         }
 
-        // Scenario
-        renderScenario(data.scenario);
+        // Market Data
+        renderMarketData(data.market_data);
 
         // Re-render current TF
         renderModalTf(currentModalTf);
-
-        // Check scenario change
-        const newRec = data.scenario?.recommended;
-        if (oldRec && newRec && oldRec !== newRec) {
-            const recLabels = { LONG: "LONG", SHORT: "SHORT", LONG_CAUTIOUS: "Hafif LONG", SHORT_CAUTIOUS: "Hafif SHORT", WAIT: "BEKLE" };
-            showToast(`⚡ Senaryo değişti: ${recLabels[oldRec] || oldRec} → ${recLabels[newRec] || newRec}`, "info");
-        }
     } catch (e) {
         console.error("Auto-refresh error:", e);
     }
 }
 
-// =================== BACKTEST ===================
-
-async function loadBacktestCoins() {
-    const select = document.getElementById("btSymbol");
-    if (select.options.length > 1) return; // Already loaded
-
-    const data = await apiFetch("/api/coins");
-    if (!data || !data.coins) return;
-
-    data.coins.forEach(coin => {
-        const opt = document.createElement("option");
-        opt.value = coin.symbol;
-        opt.textContent = coin.symbol.replace("-USDT-SWAP", "");
-        select.appendChild(opt);
-    });
-}
-
-async function runBacktest() {
-    const symbol = document.getElementById("btSymbol").value;
-    const timeframe = document.getElementById("btTimeframe").value;
-    const period = document.getElementById("btPeriod").value;
-    const minScore = document.getElementById("btMinScore").value;
-
-    if (!symbol) {
-        showToast("Lütfen bir coin seçin", "error");
-        return;
-    }
-
-    document.getElementById("btLoading").style.display = "flex";
-    document.getElementById("btResults").style.display = "none";
-    document.getElementById("btRunBtn").disabled = true;
-
-    try {
-        const data = await apiFetch(`/api/backtest/${symbol}?tf=${timeframe}&limit=${period}&min_score=${minScore}`);
-        document.getElementById("btLoading").style.display = "none";
-        document.getElementById("btRunBtn").disabled = false;
-
-        if (!data || data.error) {
-            showToast(data?.error || "Backtest başarısız", "error");
-            return;
-        }
-
-        renderBacktestResults(data);
-    } catch (e) {
-        document.getElementById("btLoading").style.display = "none";
-        document.getElementById("btRunBtn").disabled = false;
-        showToast("Backtest hatası: " + e.message, "error");
-    }
-}
-
-function renderBacktestResults(data) {
-    document.getElementById("btResults").style.display = "block";
-
-    // Summary
-    const wr = data.win_rate || 0;
-    document.getElementById("btWinRate").textContent = `${wr.toFixed(1)}%`;
-    document.getElementById("btWinRate").style.color = wr >= 50 ? "var(--green)" : "var(--red)";
-
-    document.getElementById("btTotalTrades").textContent = data.total_trades || 0;
-
-    const pnl = data.total_pnl || 0;
-    document.getElementById("btTotalPnl").textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`;
-    document.getElementById("btTotalPnl").style.color = pnl >= 0 ? "var(--green)" : "var(--red)";
-
-    document.getElementById("btAvgRR").textContent = `1:${(data.avg_rr || 0).toFixed(1)}`;
-
-    const best = data.best_trade || 0;
-    document.getElementById("btBestTrade").textContent = `+${best.toFixed(2)}%`;
-    document.getElementById("btBestTrade").style.color = "var(--green)";
-
-    const worst = data.worst_trade || 0;
-    document.getElementById("btWorstTrade").textContent = `${worst.toFixed(2)}%`;
-    document.getElementById("btWorstTrade").style.color = "var(--red)";
-
-    // Win/Loss bar
-    const wins = data.wins || 0;
-    const losses = data.losses || 0;
-    const total = wins + losses || 1;
-    document.getElementById("btWinFill").style.width = `${(wins / total) * 100}%`;
-    document.getElementById("btLossFill").style.width = `${(losses / total) * 100}%`;
-    document.getElementById("btWinCount").textContent = `${wins} Kazanç`;
-    document.getElementById("btLossCount").textContent = `${losses} Kayıp`;
-
-    // Equity curve bars
-    const equityEl = document.getElementById("btEquityBars");
-    if (data.equity_curve && data.equity_curve.length > 0) {
-        const maxAbs = Math.max(...data.equity_curve.map(e => Math.abs(e)));
-        equityEl.innerHTML = data.equity_curve.map((val, i) => {
-            const h = Math.max((Math.abs(val) / (maxAbs || 1)) * 100, 3);
-            const cls = val >= 0 ? "eq-bar-win" : "eq-bar-loss";
-            return `<div class="eq-bar ${cls}" style="height:${h}%" title="İşlem ${i + 1}: ${val >= 0 ? '+' : ''}${val.toFixed(2)}%"></div>`;
-        }).join("");
-    } else {
-        equityEl.innerHTML = "<p style='color:var(--text-muted);text-align:center;padding:20px'>İşlem yok</p>";
-    }
-
-    // Trades table
-    const tbody = document.getElementById("btTradesBody");
-    if (data.trades && data.trades.length > 0) {
-        tbody.innerHTML = data.trades.map((t, i) => {
-            const dirIcon = t.direction === "LONG" ? "↑" : "↓";
-            const dirClass = t.direction === "LONG" ? "bull" : "bear";
-            const resultIcon = t.result === "WIN" ? "✅" : "❌";
-            const pnlClass = t.pnl >= 0 ? "bull" : "bear";
-            return `<tr>
-                <td>${i + 1}</td>
-                <td class="${dirClass}">${dirIcon} ${t.direction}</td>
-                <td>${t.entry_price}</td>
-                <td>${t.exit_price}</td>
-                <td>${t.sl_price}</td>
-                <td>${t.tp_price}</td>
-                <td>${resultIcon} ${t.result}</td>
-                <td class="${pnlClass}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}%</td>
-                <td>${t.score}</td>
-            </tr>`;
-        }).join("");
-    } else {
-        tbody.innerHTML = "<tr><td colspan='9' style='text-align:center;color:var(--text-muted)'>Bu ayarlarla işlem bulunamadı</td></tr>";
-    }
-
-    // Analysis
-    const analysisEl = document.getElementById("btAnalysis");
-    if (data.analysis && data.analysis.length > 0) {
-        analysisEl.innerHTML = data.analysis.map(line => `<div class="bt-analysis-line">${line}</div>`).join("");
-    }
-}
-
-// =================== FOREX & ALTIN ICT ===================
+// =================== FOREX & ALTIN ICT (OTOMATİK TARAMA) ===================
 
 let forexCurrentTf = "1h";
 let forexScanData = null;
 let forexDetailData = null;
+let forexAutoTimer = null;
+let forexCountdown = 0;
+let forexCountdownTimer = null;
+let forexIsScanning = false;
+const FOREX_SCAN_INTERVAL = 60; // saniye
+
+function initForexAutoScan() {
+    // Sekmeye ilk girişte otomatik tara
+    if (!forexIsScanning) {
+        scanForex();
+    }
+    startForexAutoTimer();
+}
+
+function startForexAutoTimer() {
+    stopForexAutoTimer();
+    forexCountdown = FOREX_SCAN_INTERVAL;
+    updateForexCountdown();
+    forexCountdownTimer = setInterval(() => {
+        forexCountdown--;
+        updateForexCountdown();
+        if (forexCountdown <= 0) {
+            scanForex();
+            forexCountdown = FOREX_SCAN_INTERVAL;
+        }
+    }, 1000);
+}
+
+function stopForexAutoTimer() {
+    if (forexCountdownTimer) clearInterval(forexCountdownTimer);
+    if (forexAutoTimer) clearInterval(forexAutoTimer);
+    forexCountdownTimer = null;
+    forexAutoTimer = null;
+}
+
+function updateForexCountdown() {
+    const el = document.getElementById("fxAutoCountdown");
+    if (el) el.textContent = `${forexCountdown}s`;
+    const badge = document.getElementById("fxAutoBadge");
+    if (badge) badge.classList.toggle("scanning", forexIsScanning);
+}
 
 async function loadForexKillZones() {
     const data = await apiFetch("/api/forex/kill-zones");
     if (!data) return;
 
-    const bar = document.getElementById("fxKillZoneBar");
-    bar.classList.toggle("active", data.is_kill_zone);
-    document.getElementById("kzLabel").textContent = data.is_kill_zone ? `${data.active_zone} Kill Zone Aktif` : "Kill Zone Dışında";
+    const bar = document.getElementById("fxSessionBar");
+    const icon = document.getElementById("fxSessionIcon");
+    if (bar) {
+        bar.classList.toggle("active", data.is_kill_zone);
+        bar.classList.toggle("silver-bullet", false);
+    }
+    document.getElementById("kzLabel").textContent = data.is_kill_zone
+        ? `${data.active_zone} Kill Zone Aktif`
+        : "Kill Zone Dışında";
     document.getElementById("kzDesc").textContent = data.desc;
 
+    if (icon) {
+        icon.innerHTML = data.is_kill_zone
+            ? '<i class="fas fa-crosshairs"></i>'
+            : '<i class="fas fa-clock"></i>';
+    }
+
     const zonesEl = document.getElementById("kzZones");
-    zonesEl.innerHTML = data.zones.map(z =>
-        `<span class="kz-zone-pill ${z.active ? 'active' : ''}">${z.name.split(' ')[0]} ${z.hours}</span>`
-    ).join("");
+    if (zonesEl) {
+        zonesEl.innerHTML = data.zones.map(z =>
+            `<span class="kz-zone-pill ${z.active ? 'active' : ''}">${z.name.split(' ')[0]} ${z.hours}</span>`
+        ).join("");
+    }
 }
 
 function switchForexTf(tf) {
     forexCurrentTf = tf;
     document.querySelectorAll(".fx-tf-btn").forEach(b => b.classList.toggle("active", b.dataset.fxtf === tf));
-    // If we have data, rescan
-    if (forexScanData) scanForex();
+    scanForex();
+    forexCountdown = FOREX_SCAN_INTERVAL;
 }
 
 async function scanForex() {
+    if (forexIsScanning) return;
+    forexIsScanning = true;
+
     const grid = document.getElementById("fxSignalsGrid");
     const loading = document.getElementById("fxLoading");
-    const emptyState = document.getElementById("fxEmptyState");
-    const scanBtn = document.getElementById("fxScanBtn");
 
-    if (emptyState) emptyState.style.display = "none";
     loading.style.display = "flex";
-    scanBtn.classList.add("scanning");
-    grid.innerHTML = "";
-    grid.appendChild(loading);
+    if (grid && !forexScanData) grid.style.display = "none";
 
-    // Also refresh kill zones
+    updateForexCountdown();
     loadForexKillZones();
 
     const data = await apiFetch(`/api/forex/scan?tf=${forexCurrentTf}`);
+    forexIsScanning = false;
     loading.style.display = "none";
-    scanBtn.classList.remove("scanning");
+    updateForexCountdown();
+
+    // Son güncelleme zamanı
+    const updateEl = document.getElementById("fxLastUpdate");
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
     if (!data || !data.results || data.results.length === 0) {
-        grid.innerHTML = `<div class="fx-empty-state"><i class="fas fa-exclamation-triangle"></i><h3>Veri alınamadı</h3><p>Forex verileri şu an erişilemez durumda. Lütfen tekrar deneyin.</p></div>`;
+        if (updateEl) updateEl.innerHTML = `<i class="fas fa-exclamation-triangle" style="color:var(--yellow)"></i><span>Veri alınamadı - ${timeStr}</span>`;
+        if (!forexScanData) {
+            grid.style.display = "grid";
+            grid.innerHTML = `<div class="fx-no-data"><i class="fas fa-wifi-weak"></i><p>Forex verileri geçici olarak erişilemez. Otomatik yeniden denenecek...</p></div>`;
+        }
         return;
     }
 
+    if (updateEl) updateEl.innerHTML = `<i class="fas fa-check-circle" style="color:var(--green)"></i><span>Son güncelleme: ${timeStr}</span>`;
+
     forexScanData = data.results;
 
-    // Sort: strong signals first
+    // Sinyal sıralaması: güçlü sinyaller önce
     const signalOrder = { "STRONG_LONG": 0, "STRONG_SHORT": 1, "LONG": 2, "SHORT": 3, "WAIT": 4 };
     data.results.sort((a, b) => (signalOrder[a.signal] || 9) - (signalOrder[b.signal] || 9));
 
+    grid.style.display = "grid";
     grid.innerHTML = data.results.map(r => renderForexCard(r)).join("");
+
+    // Nav badge güncelle
+    const activeSigs = data.results.filter(r => r.signal !== "WAIT").length;
+    const badge = document.getElementById("navBadgeForex");
+    if (badge) {
+        badge.textContent = activeSigs > 0 ? activeSigs : "";
+        badge.style.display = activeSigs > 0 ? "inline-flex" : "none";
+    }
 }
 
 function renderForexCard(r) {
     const totalScore = r.bull_score + r.bear_score || 1;
     const bullPct = (r.bull_score / totalScore * 100).toFixed(0);
     const bearPct = (r.bear_score / totalScore * 100).toFixed(0);
+    const netAbs = Math.abs(r.net_score);
+    const confMax = Math.max(r.confluence_bull || 0, r.confluence_bear || 0);
 
+    // ICT tag'leri
     const tags = [];
     if (r.market_structure.trend !== "NEUTRAL") {
         const trendCls = r.market_structure.trend === "BULLISH" ? "bull" : "bear";
-        tags.push(`<span class="fx-card-tag ${trendCls}">${r.market_structure.trend === "BULLISH" ? "↑ Yükseliş" : "↓ Düşüş"}</span>`);
+        tags.push(`<span class="fx-tag ${trendCls}"><i class="fas fa-${r.market_structure.trend === 'BULLISH' ? 'arrow-trend-up' : 'arrow-trend-down'}"></i> ${r.market_structure.trend === "BULLISH" ? "Yükseliş" : "Düşüş"}</span>`);
     }
     if (r.market_structure.choch) {
         const chCls = r.market_structure.choch.type.includes("BULL") ? "bull" : "bear";
-        tags.push(`<span class="fx-card-tag ${chCls}">CHoCH</span>`);
+        tags.push(`<span class="fx-tag ${chCls}"><i class="fas fa-rotate"></i> CHoCH</span>`);
     }
     if (r.market_structure.bos.length > 0) {
-        tags.push(`<span class="fx-card-tag ${r.market_structure.bos[0].type.includes('BULL') ? 'bull' : 'bear'}">BOS</span>`);
+        const bosCls = r.market_structure.bos[0].type.includes('BULL') ? 'bull' : 'bear';
+        tags.push(`<span class="fx-tag ${bosCls}"><i class="fas fa-bolt"></i> BOS</span>`);
     }
     if (r.displacement && r.displacement.length > 0) {
         const lastD = r.displacement[r.displacement.length - 1];
-        tags.push(`<span class="fx-card-tag ${lastD.type.includes('BULL') ? 'bull' : 'bear'}">DISP</span>`);
+        tags.push(`<span class="fx-tag ${lastD.type.includes('BULL') ? 'bull' : 'bear'}"><i class="fas fa-bolt-lightning"></i> DISP</span>`);
     }
     if (r.fvg && (r.fvg.bull > 0 || r.fvg.bear > 0)) {
         const fvgDir = r.fvg.bull > r.fvg.bear ? "bull" : "bear";
-        tags.push(`<span class="fx-card-tag ${fvgDir}">FVG</span>`);
+        const ceCount = r.fvg.ce_bull + r.fvg.ce_bear;
+        tags.push(`<span class="fx-tag ${fvgDir}"><i class="fas fa-layer-group"></i> FVG${ceCount > 0 ? '+CE' : ''}</span>`);
     }
-    if (r.premium_discount.zone === "DISCOUNT") {
-        tags.push(`<span class="fx-card-tag bull">Discount</span>`);
-    } else if (r.premium_discount.zone === "PREMIUM") {
-        tags.push(`<span class="fx-card-tag bear">Premium</span>`);
+    if (r.order_blocks && r.order_blocks.length > 0) {
+        const obDir = r.order_blocks[0].type.includes("BULL") ? "bull" : "bear";
+        tags.push(`<span class="fx-tag ${obDir}"><i class="fas fa-cube"></i> OB</span>`);
+    }
+    if (r.liquidity_sweeps && r.liquidity_sweeps.length > 0) {
+        const lsDir = r.liquidity_sweeps[r.liquidity_sweeps.length-1].type === "BUY_SIDE_SWEEP" ? "bull" : "bear";
+        tags.push(`<span class="fx-tag ${lsDir}"><i class="fas fa-water"></i> Sweep</span>`);
     }
     if (r.ote) {
-        tags.push(`<span class="fx-card-tag ${r.ote.direction === 'LONG' ? 'bull' : 'bear'}">OTE</span>`);
+        tags.push(`<span class="fx-tag ${r.ote.direction === 'LONG' ? 'bull' : 'bear'}"><i class="fas fa-crosshairs"></i> OTE</span>`);
+    }
+    if (r.premium_discount.zone === "DISCOUNT") {
+        tags.push(`<span class="fx-tag bull"><i class="fas fa-tag"></i> Discount</span>`);
+    } else if (r.premium_discount.zone === "PREMIUM") {
+        tags.push(`<span class="fx-tag bear"><i class="fas fa-tag"></i> Premium</span>`);
     }
     if (r.amd) {
-        tags.push(`<span class="fx-card-tag ${r.amd.direction === 'LONG' ? 'bull' : 'bear'}">AMD</span>`);
+        tags.push(`<span class="fx-tag ${r.amd.direction === 'LONG' ? 'bull' : 'bear'}"><i class="fas fa-recycle"></i> AMD</span>`);
     }
     if (r.judas) {
-        tags.push(`<span class="fx-card-tag ${r.judas.type.includes('BULL') ? 'bull' : 'bear'}">Judas</span>`);
+        tags.push(`<span class="fx-tag ${r.judas.type.includes('BULL') ? 'bull' : 'bear'}"><i class="fas fa-masks-theater"></i> Judas</span>`);
     }
     if (r.smart_money_trap) {
-        tags.push(`<span class="fx-card-tag ${r.smart_money_trap.type === 'BEAR_TRAP' ? 'bull' : 'bear'}">SMT</span>`);
+        tags.push(`<span class="fx-tag ${r.smart_money_trap.type === 'BEAR_TRAP' ? 'bull' : 'bear'}"><i class="fas fa-skull-crossbones"></i> SMT</span>`);
     }
 
     const fmtPrice = (v) => {
@@ -1802,28 +1880,68 @@ function renderForexCard(r) {
         return v.toFixed(5);
     };
 
+    // Sinyal ikon ve renk
+    const signalIcons = {
+        STRONG_LONG: { icon: "fa-angles-up", cls: "strong-long" },
+        LONG: { icon: "fa-arrow-up", cls: "long" },
+        STRONG_SHORT: { icon: "fa-angles-down", cls: "strong-short" },
+        SHORT: { icon: "fa-arrow-down", cls: "short" },
+        WAIT: { icon: "fa-pause", cls: "wait" }
+    };
+    const si = signalIcons[r.signal] || signalIcons.WAIT;
+
+    // SL/TP mini bilgisi
+    let slTpMini = "";
+    if (r.sl_tp) {
+        slTpMini = `<div class="fx-card-sltp">
+            <span class="sl"><i class="fas fa-shield-halved"></i> SL: ${fmtPrice(r.sl_tp.sl)}</span>
+            <span class="tp"><i class="fas fa-bullseye"></i> TP1: ${fmtPrice(r.sl_tp.tp1)}</span>
+        </div>`;
+    }
+
+    // Daily Bias mini
+    let biasIndicator = "";
+    if (r.daily_bias && r.daily_bias.bias !== "NEUTRAL") {
+        const biasCls = r.daily_bias.bias === "BULLISH" ? "bull" : "bear";
+        biasIndicator = `<span class="fx-card-bias ${biasCls}"><i class="fas fa-compass"></i> HTF: ${r.daily_bias.bias === "BULLISH" ? "Yükseliş" : "Düşüş"}</span>`;
+    }
+
     return `
-    <div class="fx-signal-card signal-${r.signal}" onclick="openForexDetail('${r.instrument}')">
-        <div class="fx-card-top">
-            <div class="fx-card-info">
-                <div class="fx-card-icon">${r.icon}</div>
-                <div>
-                    <div class="fx-card-name">${r.name}</div>
-                    <div class="fx-card-desc">${r.desc}</div>
+    <div class="fx-card signal-${r.signal}" onclick="openForexDetail('${r.instrument}')">
+        <div class="fx-card-header">
+            <div class="fx-card-left">
+                <div class="fx-card-icon-wrap">${r.icon}</div>
+                <div class="fx-card-identity">
+                    <span class="fx-card-name">${r.name}</span>
+                    <span class="fx-card-desc">${r.desc}</span>
                 </div>
             </div>
-            <span class="fx-card-signal ${r.signal}">${r.label}</span>
+            <div class="fx-card-signal-badge ${si.cls}">
+                <i class="fas ${si.icon}"></i>
+                <span>${r.label}</span>
+            </div>
         </div>
-        <div class="fx-card-price">${fmtPrice(r.price)}</div>
-        <div class="fx-card-details">${tags.join("")}</div>
-        <div class="fx-card-score">
-            <div class="fx-card-score-bear" style="width:${bearPct}%"></div>
-            <div class="fx-card-score-bull" style="width:${bullPct}%"></div>
+
+        <div class="fx-card-body">
+            <div class="fx-card-price-row">
+                <span class="fx-card-price">${fmtPrice(r.price)}</span>
+                ${biasIndicator}
+            </div>
+            <div class="fx-card-tags">${tags.join("")}</div>
+            ${slTpMini}
         </div>
-        <div class="fx-card-footer">
-            <span>RSI: ${r.indicators.rsi.toFixed(1)}</span>
-            <span>Net: ${r.net_score > 0 ? '+' : ''}${r.net_score}</span>
-            <span>Conf: ${Math.max(r.confluence_bull||0, r.confluence_bear||0)}</span>
+
+        <div class="fx-card-bottom">
+            <div class="fx-card-meter">
+                <div class="fx-card-meter-bear" style="width:${bearPct}%"></div>
+                <div class="fx-card-meter-bull" style="width:${bullPct}%"></div>
+            </div>
+            <div class="fx-card-stats">
+                <span class="stat-item"><i class="fas fa-signal"></i> Net: ${r.net_score > 0 ? '+' : ''}${r.net_score}</span>
+                <span class="stat-item"><i class="fas fa-layer-group"></i> Conf: ${confMax}</span>
+                <span class="stat-item"><i class="fas fa-gauge-simple"></i> RSI: ${r.indicators.rsi.toFixed(1)}</span>
+                <span class="stat-item"><i class="fas fa-chart-area"></i> ATR: ${r.indicators.atr_pct}%</span>
+            </div>
         </div>
     </div>`;
 }
@@ -1831,12 +1949,12 @@ function renderForexCard(r) {
 async function openForexDetail(instrument) {
     const grid = document.getElementById("fxSignalsGrid");
     const panel = document.getElementById("fxDetailPanel");
-    const controls = document.querySelector(".fx-controls");
-    const killBar = document.getElementById("fxKillZoneBar");
+    const tfBar = document.querySelector(".fx-tf-bar");
+    const sessionBar = document.getElementById("fxSessionBar");
 
     grid.style.display = "none";
-    controls.style.display = "none";
-    killBar.style.display = "none";
+    if (tfBar) tfBar.style.display = "none";
+    if (sessionBar) sessionBar.style.display = "none";
     panel.style.display = "block";
 
     // Fetch fresh data
@@ -1914,11 +2032,11 @@ async function openForexDetail(instrument) {
 
     for (const bos of ms.bos) {
         const bosColor = bos.type.includes("BULL") ? "var(--green)" : "var(--red)";
-        msHtml += `<div class="fx-ms-row"><i class="fas fa-bolt" style="color:${bosColor}"></i><span class="label">Break of Structure</span><span class="value" style="color:${bosColor}">${bos.type.replace("_", " ")} @ ${fmtPrice(bos.level)}</span></div>`;
+        msHtml += `<div class="fx-ms-row"><i class="fas fa-bolt" style="color:${bosColor}"></i><span class="label">Break of Structure (BOS)</span><span class="value" style="color:${bosColor}">${bos.type.replace("_", " ")} @ ${fmtPrice(bos.level)}</span></div>`;
     }
     if (ms.choch) {
         const chochColor = ms.choch.type.includes("BULL") ? "var(--green)" : "var(--red)";
-        msHtml += `<div class="fx-ms-row"><i class="fas fa-rotate" style="color:${chochColor}"></i><span class="label">Change of Character</span><span class="value" style="color:${chochColor}">${ms.choch.desc}</span></div>`;
+        msHtml += `<div class="fx-ms-row"><i class="fas fa-rotate" style="color:${chochColor}"></i><span class="label">Change of Character (CHoCH)</span><span class="value" style="color:${chochColor}">${ms.choch.desc}</span></div>`;
     }
 
     if (ms.swing_highs && ms.swing_highs.length > 0) {
@@ -1936,12 +2054,12 @@ async function openForexDetail(instrument) {
     if (data.order_blocks && data.order_blocks.length > 0) {
         obList.innerHTML = data.order_blocks.map(ob => `
             <div class="fx-ob-item ${ob.type.includes('BULL') ? 'bull' : 'bear'}">
-                <span class="ob-type">${ob.type.includes("BULL") ? "🟢 Bullish" : "🔴 Bearish"}</span>
+                <span class="ob-type">${ob.type.includes("BULL") ? "🟢 Bullish OB" : "🔴 Bearish OB"}</span>
                 <span class="ob-range">${fmtPrice(ob.low)} — ${fmtPrice(ob.high)}</span>
                 <span class="ob-str">Güç: ${ob.strength}x</span>
             </div>`).join("");
     } else {
-        obList.innerHTML = `<div style="color:var(--text-muted);font-size:12px;padding:8px">Aktif Order Block bulunamadı</div>`;
+        obList.innerHTML = `<div class="fx-no-item">Aktif Order Block bulunamadı</div>`;
     }
 
     // Breaker Blocks
@@ -1967,13 +2085,13 @@ async function openForexDetail(instrument) {
         if (fvg.bull > 0) fvgHtml += `<div class="fx-ms-row"><i class="fas fa-layer-group" style="color:var(--green)"></i><span class="label">Bullish FVG</span><span class="value" style="color:var(--green)">${fvg.bull} adet${fvg.ce_bull > 0 ? ' (' + fvg.ce_bull + ' CE test edildi)' : ''}</span></div>`;
         if (fvg.bear > 0) fvgHtml += `<div class="fx-ms-row"><i class="fas fa-layer-group" style="color:var(--red)"></i><span class="label">Bearish FVG</span><span class="value" style="color:var(--red)">${fvg.bear} adet${fvg.ce_bear > 0 ? ' (' + fvg.ce_bear + ' CE test edildi)' : ''}</span></div>`;
         if (fvg.active && fvg.active.length > 0) {
-            for (const f of fvg.active.slice(0, 3)) {
+            for (const f of fvg.active.slice(0, 4)) {
                 const fc = f.type.includes("BULL") ? "var(--green)" : "var(--red)";
-                fvgHtml += `<div class="fx-ms-row"><i class="fas fa-arrow-right" style="color:${fc}"></i><span class="label">${f.type.replace("_", " ")}</span><span class="value">${fmtPrice(f.bottom)} — ${fmtPrice(f.top)} | CE: ${fmtPrice(f.ce_level)}</span></div>`;
+                fvgHtml += `<div class="fx-ms-row"><i class="fas fa-arrow-right" style="color:${fc}"></i><span class="label">${f.type.replace(/_/g, " ")}</span><span class="value">${fmtPrice(f.bottom)} — ${fmtPrice(f.top)} | CE: ${fmtPrice(f.ce_level)}</span></div>`;
             }
         }
     }
-    if (!fvgHtml) fvgHtml = `<div style="color:var(--text-muted);font-size:12px;padding:8px">Aktif FVG bulunamadı</div>`;
+    if (!fvgHtml) fvgHtml = `<div class="fx-no-item">Aktif FVG bulunamadı</div>`;
     fvgCard.innerHTML = fvgHtml;
 
     // Displacement & Liquidity
@@ -1988,7 +2106,7 @@ async function openForexDetail(instrument) {
     if (data.liquidity_sweeps && data.liquidity_sweeps.length > 0) {
         for (const s of data.liquidity_sweeps) {
             const sc = s.type === "BUY_SIDE_SWEEP" ? "var(--green)" : "var(--red)";
-            dlHtml += `<div class="fx-ms-row"><i class="fas fa-water" style="color:${sc}"></i><span class="label">Likidite Avi</span><span class="value" style="color:${sc}">${s.desc}</span></div>`;
+            dlHtml += `<div class="fx-ms-row"><i class="fas fa-water" style="color:${sc}"></i><span class="label">Liquidity Sweep</span><span class="value" style="color:${sc}">${s.desc}</span></div>`;
         }
     }
     if (data.inducement && data.inducement.length > 0) {
@@ -2001,15 +2119,16 @@ async function openForexDetail(instrument) {
         const stc = data.smart_money_trap.type === "BEAR_TRAP" ? "var(--green)" : "var(--red)";
         dlHtml += `<div class="fx-ms-row"><i class="fas fa-skull-crossbones" style="color:${stc}"></i><span class="label">Smart Money Trap</span><span class="value" style="color:${stc}">${data.smart_money_trap.desc}</span></div>`;
     }
-    if (!dlHtml) dlHtml = `<div style="color:var(--text-muted);font-size:12px;padding:8px">Displacement/Likidite verisi yok</div>`;
+    if (!dlHtml) dlHtml = `<div class="fx-no-item">Displacement/Likidite aktivitesi yok</div>`;
     dispLiqCard.innerHTML = dlHtml;
 
-    // Daily Bias & AMD
+    // Daily Bias & AMD & Judas
     const biasAmdCard = document.getElementById("fxBiasAmdCard");
     let baHtml = "";
     if (data.daily_bias) {
         const biasColor = data.daily_bias.bias === "BULLISH" ? "var(--green)" : data.daily_bias.bias === "BEARISH" ? "var(--red)" : "var(--yellow)";
-        baHtml += `<div class="fx-ms-row"><i class="fas fa-compass" style="color:${biasColor}"></i><span class="label">Daily Bias</span><span class="value" style="color:${biasColor}">${data.daily_bias.desc}</span></div>`;
+        const biasIcon = data.daily_bias.bias === "BULLISH" ? "fa-arrow-trend-up" : data.daily_bias.bias === "BEARISH" ? "fa-arrow-trend-down" : "fa-arrows-left-right";
+        baHtml += `<div class="fx-ms-row"><i class="fas ${biasIcon}" style="color:${biasColor}"></i><span class="label">Daily Bias (HTF)</span><span class="value" style="color:${biasColor}">${data.daily_bias.desc}</span></div>`;
     }
     if (data.amd) {
         const amdColor = data.amd.direction === "LONG" ? "var(--green)" : "var(--red)";
@@ -2021,15 +2140,16 @@ async function openForexDetail(instrument) {
     }
     if (data.asian_breakout) {
         const abColor = data.asian_breakout.type === "BULLISH_BREAKOUT" ? "var(--green)" : data.asian_breakout.type === "BEARISH_BREAKOUT" ? "var(--red)" : "var(--yellow)";
-        baHtml += `<div class="fx-ms-row"><i class="fas fa-sunrise" style="color:${abColor}"></i><span class="label">Asian Range</span><span class="value" style="color:${abColor}">${data.asian_breakout.desc}</span></div>`;
+        const abIcon = data.asian_breakout.type === "BULLISH_BREAKOUT" ? "fa-arrow-up" : data.asian_breakout.type === "BEARISH_BREAKOUT" ? "fa-arrow-down" : "fa-arrows-left-right";
+        baHtml += `<div class="fx-ms-row"><i class="fas ${abIcon}" style="color:${abColor}"></i><span class="label">Asian Range Breakout</span><span class="value" style="color:${abColor}">${data.asian_breakout.desc}</span></div>`;
     }
     if (data.kill_zones && data.kill_zones.is_kill_zone) {
-        baHtml += `<div class="fx-ms-row"><i class="fas fa-clock" style="color:var(--yellow)"></i><span class="label">Kill Zone</span><span class="value" style="color:var(--yellow)">${data.kill_zones.desc}</span></div>`;
+        baHtml += `<div class="fx-ms-row"><i class="fas fa-crosshairs" style="color:var(--yellow)"></i><span class="label">Kill Zone</span><span class="value" style="color:var(--yellow)">${data.kill_zones.desc}</span></div>`;
     }
     if (data.silver_bullet && data.silver_bullet.is_active) {
         baHtml += `<div class="fx-ms-row"><i class="fas fa-bullseye" style="color:var(--yellow)"></i><span class="label">Silver Bullet</span><span class="value" style="color:var(--yellow)">${data.silver_bullet.desc}</span></div>`;
     }
-    if (!baHtml) baHtml = `<div style="color:var(--text-muted);font-size:12px;padding:8px">Aktif bias/pattern verisi yok</div>`;
+    if (!baHtml) baHtml = `<div class="fx-no-item">Aktif ICT pattern verisi yok</div>`;
     biasAmdCard.innerHTML = baHtml;
 
     // Premium/Discount
@@ -2045,7 +2165,7 @@ async function openForexDetail(instrument) {
 
     if (data.ote) {
         const oteColor = data.ote.direction === "LONG" ? "var(--green)" : "var(--red)";
-        pdHtml += `<div class="fx-ms-row"><i class="fas fa-crosshairs" style="color:${oteColor}"></i><span class="label">OTE Bölgesi</span><span class="value" style="color:${oteColor}">${data.ote.desc}</span></div>`;
+        pdHtml += `<div class="fx-ms-row"><i class="fas fa-crosshairs" style="color:${oteColor}"></i><span class="label">OTE Bölgesi (Fib 0.618-0.786)</span><span class="value" style="color:${oteColor}">${data.ote.desc}</span></div>`;
     }
     pdCard.innerHTML = pdHtml;
 
@@ -2053,25 +2173,27 @@ async function openForexDetail(instrument) {
     const reasonsEl = document.getElementById("fxReasons");
     let reasonsHtml = "";
     for (const r of data.reasons_bull) {
-        reasonsHtml += `<div class="fx-reason-item bull">${r}</div>`;
+        reasonsHtml += `<div class="fx-reason-item bull"><i class="fas fa-circle-check" style="color:var(--green);margin-right:6px"></i>${r}</div>`;
     }
     for (const r of data.reasons_bear) {
-        reasonsHtml += `<div class="fx-reason-item bear">${r}</div>`;
+        reasonsHtml += `<div class="fx-reason-item bear"><i class="fas fa-circle-xmark" style="color:var(--red);margin-right:6px"></i>${r}</div>`;
     }
     if (!reasonsHtml) {
-        reasonsHtml = `<div style="color:var(--text-muted);font-size:12px;padding:8px">Net bir sinyal gerekçesi yok</div>`;
+        reasonsHtml = `<div class="fx-no-item">Net bir sinyal gerekçesi yok</div>`;
     }
     reasonsEl.innerHTML = reasonsHtml;
 
     // Indicators
     const indEl = document.getElementById("fxIndicators");
     const ind = data.indicators;
+    const rsiColor = ind.rsi > 70 ? 'var(--red)' : ind.rsi < 30 ? 'var(--green)' : 'var(--text-primary)';
+    const rsiLabel = ind.rsi > 70 ? 'Aşırı Alım' : ind.rsi < 30 ? 'Aşırı Satım' : 'Normal';
     indEl.innerHTML = `
-        <div class="fx-ind-item"><div class="fx-ind-label">RSI (14)</div><div class="fx-ind-val" style="color:${ind.rsi > 70 ? 'var(--red)' : ind.rsi < 30 ? 'var(--green)' : 'var(--text-primary)'}">${ind.rsi.toFixed(1)}</div></div>
+        <div class="fx-ind-item"><div class="fx-ind-label">RSI (14)</div><div class="fx-ind-val" style="color:${rsiColor}">${ind.rsi.toFixed(1)}</div><div class="fx-ind-sub">${rsiLabel}</div></div>
         <div class="fx-ind-item"><div class="fx-ind-label">EMA 20</div><div class="fx-ind-val">${fmtPrice(ind.ema20)}</div></div>
         <div class="fx-ind-item"><div class="fx-ind-label">EMA 50</div><div class="fx-ind-val">${fmtPrice(ind.ema50)}</div></div>
         ${ind.ema200 ? `<div class="fx-ind-item"><div class="fx-ind-label">EMA 200</div><div class="fx-ind-val">${fmtPrice(ind.ema200)}</div></div>` : ''}
-        <div class="fx-ind-item"><div class="fx-ind-label">ATR</div><div class="fx-ind-val">${fmtPrice(ind.atr)}</div></div>
+        <div class="fx-ind-item"><div class="fx-ind-label">ATR (14)</div><div class="fx-ind-val">${fmtPrice(ind.atr)}</div></div>
         <div class="fx-ind-item"><div class="fx-ind-label">ATR %</div><div class="fx-ind-val">${ind.atr_pct}%</div></div>
     `;
 }
@@ -2079,6 +2201,8 @@ async function openForexDetail(instrument) {
 function closeFxDetail() {
     document.getElementById("fxDetailPanel").style.display = "none";
     document.getElementById("fxSignalsGrid").style.display = "grid";
-    document.querySelector(".fx-controls").style.display = "flex";
-    document.getElementById("fxKillZoneBar").style.display = "flex";
+    const tfBar = document.querySelector(".fx-tf-bar");
+    const sessionBar = document.getElementById("fxSessionBar");
+    if (tfBar) tfBar.style.display = "flex";
+    if (sessionBar) sessionBar.style.display = "flex";
 }

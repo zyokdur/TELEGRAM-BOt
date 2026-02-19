@@ -183,8 +183,13 @@ def check_trades():
 
 
 def run_optimizer():
-    """Otomatik optimizasyonu çalıştır"""
+    """Otomatik optimizasyonu çalıştır (scan_lock ile korunur)"""
     if not bot_state["running"]:
+        return
+
+    # scan_lock al — tarama sırasında params değişmesin (race condition koruması)
+    if not scan_lock.acquire(blocking=False):
+        logger.debug("⏳ Optimizer: Tarama devam ediyor, sonraki döngüye erteleniyor")
         return
 
     try:
@@ -199,6 +204,8 @@ def run_optimizer():
 
     except Exception as e:
         logger.error(f"Optimizasyon hatası: {e}")
+    finally:
+        scan_lock.release()
 
 
 # Scheduler - her start/stop döngüsünde yeniden oluşturulur
@@ -361,11 +368,16 @@ def api_optimization_summary():
 
 @app.route("/api/optimization/run", methods=["POST"])
 def api_run_optimization():
-    """Manuel optimizasyon tetikle"""
-    result = self_optimizer.run_optimization()
-    if result["changes"]:
-        ict_strategy.reload_params()
-    return jsonify(result)
+    """Manuel optimizasyon tetikle (scan_lock ile korunur)"""
+    if not scan_lock.acquire(blocking=False):
+        return jsonify({"status": "BUSY", "reason": "Tarama devam ediyor, lütfen bekleyin"}), 409
+    try:
+        result = self_optimizer.run_optimization()
+        if result["changes"]:
+            ict_strategy.reload_params()
+        return jsonify(result)
+    finally:
+        scan_lock.release()
 
 
 @app.route("/api/signal/<int:signal_id>/cancel", methods=["POST"])
@@ -494,6 +506,62 @@ def api_coin_detail(symbol):
             else:
                 obv.append(obv[-1])
         return pd.Series(obv, index=df.index)
+
+    # ── YENİ ANA STRATEJI GÖSTERGELERİ ──
+
+    def _donchian(df, period=20):
+        """Donchian Channel — saf kırılım göstergesi"""
+        high = df["high"]
+        low = df["low"]
+        upper = high.rolling(window=period).max()
+        lower = low.rolling(window=period).min()
+        middle = (upper + lower) / 2
+        width = ((upper - lower) / middle).replace(0, np.nan) * 100  # kanal genişliği %
+        return upper, middle, lower, width
+
+    def _vwap_rolling(df, period=50):
+        """Rolling VWAP — hacim ağırlıklı ortalama fiyat + standart sapma bantları"""
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        tp_vol = typical_price * df["volume"]
+        cum_vol = df["volume"].rolling(window=period).sum()
+        cum_tp_vol = tp_vol.rolling(window=period).sum()
+        vwap = cum_tp_vol / cum_vol.replace(0, np.nan)
+        # VWAP standart sapma — uzama ölçümü
+        vwap_sq = ((typical_price - vwap) ** 2 * df["volume"]).rolling(window=period).sum()
+        vwap_std = (vwap_sq / cum_vol.replace(0, np.nan)).apply(lambda x: x ** 0.5 if x > 0 else 0)
+        return vwap, vwap_std
+
+    def _dpo(close, period=20):
+        """Detrended Price Oscillator — döngüsel pozisyon, trendi çıkarır"""
+        shift = period // 2 + 1
+        sma = close.rolling(window=period).mean()
+        dpo_val = close - sma.shift(shift)
+        return dpo_val
+
+    def _mfi(df, period=14):
+        """Money Flow Index — hacim ağırlıklı RSI"""
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        money_flow = typical_price * df["volume"]
+        tp_diff = typical_price.diff()
+        pos_flow = money_flow.where(tp_diff > 0, 0.0)
+        neg_flow = money_flow.where(tp_diff < 0, 0.0)
+        pos_sum = pos_flow.rolling(window=period).sum()
+        neg_sum = neg_flow.rolling(window=period).sum()
+        mfr = pos_sum / neg_sum.replace(0, np.nan)
+        mfi_val = 100 - (100 / (1 + mfr))
+        return mfi_val
+
+    def _cmf(df, period=20):
+        """Chaikin Money Flow — kapanış pozisyonuna göre para akışı"""
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        vol = df["volume"]
+        hl_range = (high - low).replace(0, np.nan)
+        clv = ((close - low) - (high - close)) / hl_range  # Close Location Value [-1, +1]
+        mf_vol = clv * vol
+        cmf_val = mf_vol.rolling(window=period).sum() / vol.rolling(window=period).sum().replace(0, np.nan)
+        return cmf_val
 
     def _find_support_resistance(df, lookback=50):
         """Pivot tabanlı destek/direnç seviyeleri"""
@@ -990,43 +1058,239 @@ def api_coin_detail(symbol):
                           "desc": "Yeterli pivot noktası bulunamadı. Veri yetersiz veya çok yatay hareket — bu göstergeden sinyal türetilemiyor."})
         return result
 
+    # ── YENİ ANA STRATEJI YORUM FONKSİYONLARI ──
+
+    def _interpret_donchian(current_price, upper, middle, lower, width, prev_width=None, prev_close=None, prev_upper=None, prev_lower=None):
+        """Donchian Channel — Kırılım + Kanal Pozisyonu + Squeeze"""
+        if upper is None or np.isnan(upper):
+            return {"label": "Veri yok", "signal": "NEUTRAL", "color": "gray", "score": 0}
+
+        position = ((current_price - lower) / (upper - lower) * 100) if (upper - lower) > 0 else 50
+        result = {
+            "upper": round(upper, 8), "middle": round(middle, 8), "lower": round(lower, 8),
+            "width_pct": round(width, 2), "position": round(position, 1)
+        }
+
+        # Taze kırılım tespiti: önceki mum kanalın içindeydi, şimdi dışında
+        fresh_breakout_up = prev_close is not None and prev_upper is not None and prev_close <= prev_upper and current_price > upper
+        fresh_breakout_down = prev_close is not None and prev_lower is not None and prev_close >= prev_lower and current_price < lower
+
+        # Squeeze tespiti: kanal daralıyor
+        is_squeeze = prev_width is not None and width < prev_width * 0.7
+
+        if fresh_breakout_up:
+            result.update({"label": "TAZE KIRILIM ↑↑", "signal": "STRONG_BULLISH", "color": "green", "score": 35,
+                          "desc": f"Fiyat {upper:.2f} direncini kırarak yeni 20 periyot zirvesi yaptı! Taze kırılım — güçlü momentum. Geri çekilmelerde LONG giriş değerlendirin."})
+        elif fresh_breakout_down:
+            result.update({"label": "TAZE KIRILIM ↓↓", "signal": "STRONG_BEARISH", "color": "red", "score": 35,
+                          "desc": f"Fiyat {lower:.2f} desteğini kırarak yeni 20 periyot dibi yaptı! Taze kırılım — güçlü satış. Yükselişlerde SHORT değerlendirin."})
+        elif position > 95:
+            result.update({"label": "Üst Bantta", "signal": "BULLISH", "color": "green", "score": 20,
+                          "desc": f"Fiyat Donchian üst bandına yapışık — trend güçlü ama kırılım taze değil. Uzama riski var."})
+        elif position < 5:
+            result.update({"label": "Alt Bantta", "signal": "BEARISH", "color": "red", "score": 20,
+                          "desc": f"Fiyat Donchian alt bandına yapışık — düşüş trendi güçlü ama kırılım taze değil."})
+        elif 40 <= position <= 60:
+            if is_squeeze:
+                result.update({"label": "SQUEEZE — Patlama Yakın ⚡", "signal": "NEUTRAL", "color": "orange", "score": 10,
+                              "desc": f"Kanal daralıyor (genişlik: %{width:.1f}) — sıkışma sonrası büyük hareket bekleniyor. Kırılım yönünü bekleyin."})
+            else:
+                result.update({"label": "Kanal Ortası — Yön Yok", "signal": "NEUTRAL", "color": "gray", "score": 0,
+                              "desc": f"Fiyat kanalın ortasında (pozisyon: %{position:.0f}). Net yön yok — uç noktalara yaklaşmasını bekleyin."})
+        elif position > 75:
+            result.update({"label": "Üst Banda Yakın", "signal": "BULLISH", "color": "lightgreen", "score": 15,
+                          "desc": f"Fiyat üst banda yaklaşıyor (pozisyon: %{position:.0f}). Boğa basılınca devamı → pullback'te giriş fırsatı."})
+        elif position < 25:
+            result.update({"label": "Alt Banda Yakın", "signal": "BEARISH", "color": "orange", "score": 15,
+                          "desc": f"Fiyat alt banda yaklaşıyor (pozisyon: %{position:.0f}). Ayı baskılıysa devamı → yükselişte SHORT fırsatı."})
+        else:
+            # 25-40 veya 60-75 arası
+            bias = "hafif boğa" if position > 50 else "hafif ayı"
+            result.update({"label": f"Kanal İçi ({bias})", "signal": "NEUTRAL", "color": "gray", "score": 5,
+                          "desc": f"Fiyat kanal içinde (pozisyon: %{position:.0f}). Belirgin kırılım yok — kenar bölgelere kadar bekleyin."})
+        return result
+
+    def _interpret_vwap_dpo(current_price, vwap_val, vwap_std, dpo_val, dpo_std):
+        """VWAP + DPO birleşik yorumu — fiyat makul mü ve döngüsel pozisyon"""
+        if vwap_val is None or np.isnan(vwap_val):
+            return {"label": "Veri yok", "signal": "NEUTRAL", "color": "gray", "score": 0}
+
+        # VWAP mesafesi (standart sapma cinsinden)
+        vwap_dev = (current_price - vwap_val) / vwap_std if vwap_std > 0 else 0
+        vwap_dist_pct = ((current_price - vwap_val) / vwap_val * 100) if vwap_val > 0 else 0
+
+        # DPO standart sapma cinsinden pozisyon
+        dpo_dev = dpo_val / dpo_std if dpo_std > 0 else 0
+
+        result = {
+            "vwap": round(vwap_val, 8),
+            "vwap_dist_pct": round(vwap_dist_pct, 2),
+            "vwap_dev": round(vwap_dev, 2),
+            "dpo": round(dpo_val, 8),
+            "dpo_dev": round(dpo_dev, 2),
+        }
+
+        # Aşırı uzama: VWAP'tan +2σ veya DPO +2σ
+        if vwap_dev >= 2.0 or dpo_dev >= 2.0:
+            result.update({"label": f"AŞIRI UZANMIŞ ↑ (VWAP +{vwap_dev:.1f}σ)", "signal": "OVEREXTENDED_BULL", "color": "red", "score": 3,
+                          "desc": f"Fiyat VWAP'tan %{vwap_dist_pct:+.1f} uzakta ({vwap_dev:+.1f}σ), DPO {dpo_dev:+.1f}σ. Çok uzamış — buradan LONG açmak tavan avcılığı. Geri çekilme bekleyin."})
+        elif vwap_dev <= -2.0 or dpo_dev <= -2.0:
+            result.update({"label": f"AŞIRI DÜŞMÜŞ ↓ (VWAP {vwap_dev:.1f}σ)", "signal": "OVEREXTENDED_BEAR", "color": "red", "score": 3,
+                          "desc": f"Fiyat VWAP'tan %{vwap_dist_pct:+.1f} uzakta ({vwap_dev:+.1f}σ), DPO {dpo_dev:+.1f}σ. Çok düşmüş — buradan SHORT açmak dip avcılığı. Tepki yükselişi bekleyin."})
+        elif -0.5 <= vwap_dev <= 0.5 and -0.5 <= dpo_dev <= 0.5:
+            result.update({"label": f"İDEAL GİRİŞ BÖLGESİ ✓", "signal": "IDEAL_ENTRY", "color": "green", "score": 35,
+                          "desc": f"Fiyat VWAP'a çok yakın ({vwap_dev:+.1f}σ) ve DPO nötr ({dpo_dev:+.1f}σ). Adil fiyat bölgesi — yön belirlendiyse en iyi giriş noktası."})
+        elif -1.0 <= vwap_dev <= 1.0 and -1.0 <= dpo_dev <= 1.0:
+            result.update({"label": f"Makul Giriş Bölgesi", "signal": "FAIR_ENTRY", "color": "lightgreen", "score": 28,
+                          "desc": f"Fiyat VWAP'a yakın ({vwap_dev:+.1f}σ), DPO normal ({dpo_dev:+.1f}σ). Kabul edilebilir giriş — R/R uygunsa pozisyon alınabilir."})
+        elif vwap_dev > 1.0 and dpo_dev > 0:
+            result.update({"label": f"Uzamaya Başlıyor ↑ (VWAP +{vwap_dev:.1f}σ)", "signal": "STRETCHING_BULL", "color": "orange", "score": 12,
+                          "desc": f"Fiyat VWAP'ın üstüne çıkmaya başladı ({vwap_dev:+.1f}σ). Trend devam edebilir ama giriş noktası geçmekte — dikkatli olun."})
+        elif vwap_dev < -1.0 and dpo_dev < 0:
+            result.update({"label": f"Düşüş Uzaması ↓ (VWAP {vwap_dev:.1f}σ)", "signal": "STRETCHING_BEAR", "color": "orange", "score": 12,
+                          "desc": f"Fiyat VWAP'ın altına düşmeye devam ediyor ({vwap_dev:+.1f}σ). Düşüş sürebilir ama SHORT için geç kalınmış olabilir."})
+        elif vwap_dev < -0.5 and dpo_dev > 0:
+            # Fiyat VWAP altında ama DPO toparlanıyor — dip oluşumu
+            result.update({"label": "Dip Oluşumu Sinyali ↗", "signal": "BOTTOM_FORMING", "color": "green", "score": 25,
+                          "desc": f"Fiyat VWAP altında ({vwap_dev:+.1f}σ) ama DPO yukarı dönüyor ({dpo_dev:+.1f}σ). Dip oluşuyor — LONG için hazırlık."})
+        elif vwap_dev > 0.5 and dpo_dev < 0:
+            # Fiyat VWAP üstünde ama DPO düşüyor — tepe oluşumu
+            result.update({"label": "Tepe Oluşumu Sinyali ↘", "signal": "TOP_FORMING", "color": "orange", "score": 25,
+                          "desc": f"Fiyat VWAP üstünde ({vwap_dev:+.1f}σ) ama DPO aşağı dönüyor ({dpo_dev:+.1f}σ). Tepe oluşuyor — LONG'lardan çıkış hazırlığı."})
+        else:
+            result.update({"label": f"Normal Bölge", "signal": "NEUTRAL", "color": "gray", "score": 18,
+                          "desc": f"Fiyat normal aralıkta (VWAP: {vwap_dev:+.1f}σ, DPO: {dpo_dev:+.1f}σ). Belirgin uzama yok."})
+        return result
+
+    def _interpret_cmf(val):
+        """CMF yorumu — para akışı yönü"""
+        if val is None or np.isnan(val):
+            return {"value": None, "label": "Veri yok", "signal": "NEUTRAL", "color": "gray"}
+        val = round(val, 4)
+        if val >= 0.15:
+            return {"value": val, "label": f"Güçlü Para Girişi ({val:+.3f})", "signal": "BULLISH", "color": "green",
+                    "desc": f"CMF {val:+.3f} — Kapanışlar sürekli mumun üst yarısında ve yüksek hacimle. Kurumsal alım aktif."}
+        elif val >= 0.05:
+            return {"value": val, "label": f"Para Girişi ({val:+.3f})", "signal": "BULLISH", "color": "lightgreen",
+                    "desc": f"CMF {val:+.3f} — Alıcılar baskın ama yeşil ışık yakacak kadar güçlü değil. Trend yönüyle uyumluysa giriş destekler."}
+        elif val <= -0.15:
+            return {"value": val, "label": f"Güçlü Para Çıkışı ({val:+.3f})", "signal": "BEARISH", "color": "red",
+                    "desc": f"CMF {val:+.3f} — Kapanışlar sürekli mumun alt yarısında. Kurumsal satış aktif — LONG pozisyon riskli."}
+        elif val <= -0.05:
+            return {"value": val, "label": f"Para Çıkışı ({val:+.3f})", "signal": "BEARISH", "color": "orange",
+                    "desc": f"CMF {val:+.3f} — Satıcılar hafif baskın. Trend tersi bir hareket oluşabilir."}
+        else:
+            return {"value": val, "label": f"Dengeli ({val:+.3f})", "signal": "NEUTRAL", "color": "gray",
+                    "desc": f"CMF {val:+.3f} — Para akışı dengede. Alıcı/satıcı baskınlığı yok — yönü belirleyecek katalizör bekleyin."}
+
+    def _interpret_mfi(val):
+        """MFI yorumu — hacim ağırlıklı RSI"""
+        if val is None or np.isnan(val):
+            return {"value": None, "label": "Veri yok", "signal": "NEUTRAL", "color": "gray"}
+        val = round(val, 1)
+        if val >= 80:
+            return {"value": val, "label": f"Aşırı Alım ({val})", "signal": "OVERBOUGHT", "color": "red",
+                    "desc": f"MFI {val} — Hacim ağırlıklı aşırı alım. RSI'dan daha güvenilir çünkü gerçek para akışını ölçer. Yeni LONG riskli."}
+        elif val >= 60:
+            return {"value": val, "label": f"Alım Baskısı ({val})", "signal": "BULLISH", "color": "green",
+                    "desc": f"MFI {val} — Sağlıklı para girişi var. Alıcılar aktif ama aşırıya kaçmamış — ideal bölge."}
+        elif val <= 20:
+            return {"value": val, "label": f"Aşırı Satım ({val})", "signal": "OVERSOLD", "color": "green",
+                    "desc": f"MFI {val} — Hacim ağırlıklı aşırı satım. Satış baskısı tükeniyor — dönüş sinyali olabilir."}
+        elif val <= 40:
+            return {"value": val, "label": f"Satış Baskısı ({val})", "signal": "BEARISH", "color": "orange",
+                    "desc": f"MFI {val} — Para çıkışı var. Satıcılar baskın — LONG pozisyon için uygun değil."}
+        else:
+            return {"value": val, "label": f"Nötr ({val})", "signal": "NEUTRAL", "color": "gray",
+                    "desc": f"MFI {val} — Para akışı dengede (40-60 bandı). Belirgin alıcı/satıcı baskınlığı yok."}
+
     # ── ANA ANALİZ FONKSİYONU ──
 
     def _analyze_tf(df, tf_label):
-        """Tek TF için 10 gösterge ile gelişmiş teknik analiz"""
+        """Tek TF: Yapısal Giriş Noktası Stratejisi
+        Ana Sütunlar: Donchian(35) + VWAP/DPO(35) + CMF/MFI/OBV(30)
+        Destek: RSI, MACD, ADX, BB, S/R, FVG, Diverjans (max ±15)
+        """
         if df is None or df.empty or len(df) < 30:
             return {
                 "timeframe": tf_label, "error": "Yetersiz veri",
+                "donchian": {"label": "Veri yok", "signal": "NEUTRAL", "score": 0},
+                "vwap_dpo": {"label": "Veri yok", "signal": "NEUTRAL", "score": 0},
+                "cmf": {"label": "Veri yok", "signal": "NEUTRAL"},
+                "mfi": {"label": "Veri yok", "signal": "NEUTRAL"},
+                "obv": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "rsi": {"value": None, "label": "Veri yok", "signal": "NEUTRAL"},
                 "stoch_rsi": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "macd": {"label": "Veri yok", "signal_type": "NEUTRAL"},
                 "bollinger": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "adx": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "atr": {"label": "Veri yok", "signal": "NEUTRAL"},
-                "obv": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "volume": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "fvg": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "support_resistance": {"label": "Veri yok", "signal": "NEUTRAL"},
                 "divergence": {"label": "Veri yok", "type": "NONE"},
-                "trend": "UNKNOWN", "verdict": "VERİ YOK",
-                "confidence": 0
+                "verdict": "NEUTRAL", "verdict_label": "VERİ YOK",
+                "verdict_color": "gray", "direction": "NONE",
+                "bull_score": 0, "bear_score": 0, "net_score": 0, "confidence": 0,
+                "pillar_scores": {
+                    "donchian": {"score": 0, "max": 35, "label": "Kırılım & Yön"},
+                    "vwap_dpo": {"score": 0, "max": 35, "label": "Fiyat Makul mü?"},
+                    "money_flow": {"score": 0, "max": 30, "direction": "NEUTRAL", "label": "Para Akışı"},
+                    "support_adj": {"score": 0, "max": 15, "label": "Destek Göstergeler"},
+                }
             }
 
         close = df["close"]
         current_price = close.iloc[-1]
+        prev_close = close.iloc[-2] if len(close) >= 2 else current_price
 
-        # 1. RSI
+        # ════════════ ANA SÜTUN 1: DONCHIAN CHANNEL (35 puan) ════════════
+        dc_upper, dc_middle, dc_lower, dc_width = _donchian(df, period=20)
+        dc_u = dc_upper.iloc[-1] if not dc_upper.empty else None
+        dc_m = dc_middle.iloc[-1] if not dc_middle.empty else None
+        dc_l = dc_lower.iloc[-1] if not dc_lower.empty else None
+        dc_w = dc_width.iloc[-1] if not dc_width.empty else None
+        prev_dc_u = dc_upper.iloc[-2] if len(dc_upper) >= 2 else None
+        prev_dc_l = dc_lower.iloc[-2] if len(dc_lower) >= 2 else None
+        prev_dc_w = dc_width.iloc[-5] if len(dc_width) >= 5 else None
+        donchian_result = _interpret_donchian(current_price, dc_u, dc_m, dc_l, dc_w, prev_dc_w, prev_close, prev_dc_u, prev_dc_l)
+
+        # ════════════ ANA SÜTUN 2: VWAP + DPO (35 puan) ════════════
+        vwap_series, vwap_std_series = _vwap_rolling(df, period=50)
+        vwap_val = vwap_series.iloc[-1] if not vwap_series.empty and not np.isnan(vwap_series.iloc[-1]) else None
+        vwap_std_val = vwap_std_series.iloc[-1] if not vwap_std_series.empty and not np.isnan(vwap_std_series.iloc[-1]) else 0
+
+        dpo_series = _dpo(close, period=20)
+        dpo_val = dpo_series.iloc[-1] if not dpo_series.empty and not np.isnan(dpo_series.iloc[-1]) else 0
+        dpo_std_val = dpo_series.dropna().std() if len(dpo_series.dropna()) > 5 else 1
+
+        vwap_dpo_result = _interpret_vwap_dpo(current_price, vwap_val, vwap_std_val, dpo_val, dpo_std_val)
+
+        # ════════════ ANA SÜTUN 3: PARA AKIŞI — CMF + MFI + OBV (30 puan) ════════════
+        cmf_series = _cmf(df, period=20)
+        cmf_val = cmf_series.iloc[-1] if not cmf_series.empty and not np.isnan(cmf_series.iloc[-1]) else None
+        cmf_result = _interpret_cmf(cmf_val)
+
+        mfi_series = _mfi(df, period=14)
+        mfi_val = mfi_series.iloc[-1] if not mfi_series.empty and not np.isnan(mfi_series.iloc[-1]) else None
+        mfi_result = _interpret_mfi(mfi_val)
+
+        obv_series = _obv(df)
+        obv_result = _interpret_obv(obv_series, close)
+
+        # ════════════ DESTEK GÖSTERGELERİ (bilgilendirici + max ±15 bonus) ════════════
+        # RSI
         rsi_series = _rsi(close, 14)
         rsi_val = rsi_series.iloc[-1] if not rsi_series.empty else None
         rsi_result = _interpret_rsi(rsi_val)
 
-        # 2. Stochastic RSI
+        # Stochastic RSI
         stoch_k, stoch_d = _stoch_rsi(close)
         k_val = stoch_k.iloc[-1] if not stoch_k.empty and not np.isnan(stoch_k.iloc[-1]) else None
         d_val = stoch_d.iloc[-1] if not stoch_d.empty and not np.isnan(stoch_d.iloc[-1]) else None
         stoch_result = _interpret_stoch_rsi(k_val, d_val)
 
-        # 3. MACD
+        # MACD
         macd_line, signal_line, histogram = _macd(close)
         macd_val = macd_line.iloc[-1] if not macd_line.empty else None
         sig_val = signal_line.iloc[-1] if not signal_line.empty else None
@@ -1034,274 +1298,278 @@ def api_coin_detail(symbol):
         prev_hist = histogram.iloc[-2] if len(histogram) >= 2 else None
         macd_result = _interpret_macd(macd_val, sig_val, hist_val, prev_hist)
 
-        # 4. Bollinger Bands
+        # Bollinger Bands
         bb_upper, bb_middle, bb_lower = _bollinger_bands(close)
         bb_width_series = ((bb_upper - bb_lower) / bb_middle).dropna()
         bb_width = bb_width_series.iloc[-1] if not bb_width_series.empty else 0
         prev_bb_width = bb_width_series.iloc[-5] if len(bb_width_series) >= 5 else None
-        bb_result = _interpret_bb(current_price,
-                                  bb_upper.iloc[-1], bb_middle.iloc[-1], bb_lower.iloc[-1],
-                                  bb_width, prev_bb_width)
+        bb_result = _interpret_bb(current_price, bb_upper.iloc[-1], bb_middle.iloc[-1], bb_lower.iloc[-1], bb_width, prev_bb_width)
 
-        # 5. ADX
+        # ADX
         adx_series, plus_di, minus_di = _adx(df)
         adx_val = adx_series.iloc[-1] if not adx_series.empty and not np.isnan(adx_series.iloc[-1]) else None
         pdi_val = plus_di.iloc[-1] if not plus_di.empty else None
         mdi_val = minus_di.iloc[-1] if not minus_di.empty else None
         adx_result = _interpret_adx(adx_val, pdi_val, mdi_val)
 
-        # 6. ATR
+        # ATR
         atr_series = _atr(df)
         atr_val = atr_series.iloc[-1] if not atr_series.empty else None
         atr_result = _interpret_atr(atr_val, current_price)
 
-        # 7. OBV
-        obv_series = _obv(df)
-        obv_result = _interpret_obv(obv_series, close)
-
-        # 8. Volume
+        # Volume
         vol_result = _analyze_volume(df)
 
-        # 9. FVG
+        # FVG
         fvg_result = _check_fvg(df)
 
-        # 10. Destek/Direnç
+        # Destek/Direnç
         supports, resistances = _find_support_resistance(df)
         sr_result = _interpret_sr(supports, resistances, current_price)
 
-        # 11. Diverjans (RSI + fiyat)
+        # Diverjans
         div_result = _detect_divergence(close, rsi_series, lookback=25)
         if div_result is None:
             div_result = {"type": "NONE", "label": "Veri yetersiz", "desc": "", "color": "gray"}
 
-        # ── EMA Trend Yapısı ──
-        ema_8 = close.ewm(span=8, adjust=False).mean()
-        ema_21 = close.ewm(span=21, adjust=False).mean()
-        ema_50 = close.ewm(span=50, adjust=False).mean() if len(close) >= 50 else None
-        ema_200 = close.ewm(span=200, adjust=False).mean() if len(close) >= 200 else None
+        # ════════════ SKORLAMA: 3 ANA SÜTUN + DESTEK BONUS ════════════
 
-        ema8_val = ema_8.iloc[-1]
-        ema21_val = ema_21.iloc[-1]
-        ema50_val = ema_50.iloc[-1] if ema_50 is not None else None
-        ema200_val = ema_200.iloc[-1] if ema_200 is not None else None
+        # --- Sütun 1: Donchian — yön ve kırılım (max 35) ---
+        dc_signal = donchian_result.get("signal", "NEUTRAL")
+        dc_score = donchian_result.get("score", 0)
 
-        # EMA sıralaması (golden/death cross)
-        ema_order_bull = ema8_val > ema21_val and (ema50_val is None or ema21_val > ema50_val)
-        ema_order_bear = ema8_val < ema21_val and (ema50_val is None or ema21_val < ema50_val)
-
-        trend_signals = []
-        if ema8_val > ema21_val:
-            trend_signals.append("BULL")
+        # Donchian yönü belirler
+        if dc_signal in ("STRONG_BULLISH", "BULLISH"):
+            direction = "LONG"
+        elif dc_signal in ("STRONG_BEARISH", "BEARISH"):
+            direction = "SHORT"
         else:
-            trend_signals.append("BEAR")
+            direction = "NONE"
 
-        if ema50_val is not None:
-            if current_price > ema50_val:
-                trend_signals.append("ABOVE_50")
-            else:
-                trend_signals.append("BELOW_50")
+        # --- Sütun 2: VWAP + DPO — fiyat makul mü (max 35) ---
+        vd_signal = vwap_dpo_result.get("signal", "NEUTRAL")
+        vd_score = vwap_dpo_result.get("score", 0)
 
-        if "BULL" in trend_signals and "ABOVE_50" in trend_signals:
-            trend = "BULLISH"
-            trend_label = "Güçlü Yükseliş Trendi"
-            trend_desc = "EMA8 > EMA21 ve fiyat EMA50 üzerinde — yapısal yükseliş."
-        elif "BEAR" in trend_signals and "BELOW_50" in trend_signals:
-            trend = "BEARISH"
-            trend_label = "Güçlü Düşüş Trendi"
-            trend_desc = "EMA8 < EMA21 ve fiyat EMA50 altında — yapısal düşüş."
-        elif "BULL" in trend_signals:
-            trend = "WEAKENING_BEAR"
-            trend_label = "Zayıflayan Düşüş"
-            trend_desc = "EMA8 > EMA21 ama fiyat EMA50 altında — erken dönüş sinyali."
+        # VWAP/DPO uyumsuzluk kontrolü: yön ve fiyat yapısı çelişiyorsa cezalandır
+        if direction == "LONG" and vd_signal in ("OVEREXTENDED_BULL", "TOP_FORMING"):
+            vd_score = min(vd_score, 5)  # uzamış/tepe piyasada LONG skoru düşür
+        elif direction == "SHORT" and vd_signal in ("OVEREXTENDED_BEAR", "BOTTOM_FORMING"):
+            vd_score = min(vd_score, 5)  # düşmüş/dip piyasada SHORT skoru düşür
+        # Ters yönde de kontrol: direction=LONG ama fiyat aşırı düşük → VWAP skoru korunur (iyi giriş)
+        # direction=SHORT ama fiyat aşırı yüksek → VWAP skoru korunur (iyi giriş)
+
+        # --- Sütun 3: Para Akışı — CMF + MFI + OBV (max 30) ---
+        flow_score = 0
+        flow_bull = 0
+        flow_bear = 0
+
+        # CMF (max 12)
+        cmf_sig = cmf_result.get("signal", "NEUTRAL")
+        if cmf_sig == "BULLISH":
+            s = 12 if (cmf_result.get("value") or 0) >= 0.15 else 8
+            flow_bull += s
+        elif cmf_sig == "BEARISH":
+            s = 12 if (cmf_result.get("value") or 0) <= -0.15 else 8
+            flow_bear += s
+
+        # MFI (max 10)
+        mfi_sig = mfi_result.get("signal", "NEUTRAL")
+        mfi_v = mfi_result.get("value") or 50
+        if mfi_sig == "BULLISH":
+            flow_bull += 10
+        elif mfi_sig == "BEARISH":
+            flow_bear += 10
+        elif mfi_sig == "OVERBOUGHT":
+            flow_bear += 8  # aşırı alım → güçlü satış sinyali (BULLISH'ten az olamaz)
+        elif mfi_sig == "OVERSOLD":
+            flow_bull += 8  # aşırı satım → güçlü alım sinyali
+
+        # OBV (max 8)
+        obv_sig = obv_result.get("signal", "NEUTRAL")
+        if obv_sig == "BULLISH":
+            flow_bull += 8
+        elif obv_sig == "BEARISH":
+            flow_bear += 8
+
+        # Net para akışı skoru
+        if flow_bull > flow_bear:
+            flow_score = flow_bull
+            flow_direction = "BULL"
+        elif flow_bear > flow_bull:
+            flow_score = flow_bear
+            flow_direction = "BEAR"
         else:
-            trend = "WEAKENING_BULL"
-            trend_label = "Zayıflayan Yükseliş"
-            trend_desc = "EMA8 < EMA21 ama fiyat EMA50 üzerinde — momentum kaybolıyor."
+            flow_score = max(flow_bull, flow_bear)  # eşitlikte de skoru koru
+            flow_direction = "NEUTRAL"
 
-        if ema_order_bull:
-            trend_desc += " EMA'lar boğa sıralamasında (8>21>50)."
-        elif ema_order_bear:
-            trend_desc += " EMA'lar ayı sıralamasında (8<21<50)."
+        # --- DESTEK GÖSTERGELERİ BONUS/CEZA (max ±15) ---
+        support_bonus = 0
 
-        # ── AĞIRLIKLI GÜVEN SKORU (0-100) ──
-        # Her gösterge ağırlıklı puan verir
-        weights = {
-            "trend": 20,      # %20 — trend en önemli
-            "adx": 15,        # %15 — trend gücü
-            "macd": 15,       # %15 — momentum
-            "rsi": 10,        # %10
-            "stoch_rsi": 8,   # %8
-            "volume": 10,     # %10
-            "obv": 7,         # %7
-            "bollinger": 5,   # %5
-            "fvg": 5,         # %5
-            "divergence": 5,  # %5
-        }
+        # MACD (±3)
+        macd_sig = macd_result.get("signal_type", "NEUTRAL")
+        if macd_sig == "BULLISH":
+            support_bonus += 3
+        elif macd_sig == "BEARISH":
+            support_bonus -= 3
+        elif macd_sig == "WEAKENING_BULL":
+            support_bonus -= 1
+        elif macd_sig == "WEAKENING_BEAR":
+            support_bonus += 1
 
-        bull_score = 0
-        bear_score = 0
-        indicator_scores = {}
+        # RSI (±3) — sadece aşırı bölgelerde
+        rsi_v = rsi_result.get("value") or 50
+        if rsi_v >= 75:
+            support_bonus -= 3  # aşırı alım
+        elif rsi_v >= 65:
+            support_bonus -= 1
+        elif rsi_v <= 25:
+            support_bonus += 3  # aşırı satım
+        elif rsi_v <= 35:
+            support_bonus += 1
 
-        # Trend skoru
-        if trend == "BULLISH":
-            bull_score += weights["trend"]
-            indicator_scores["trend"] = {"direction": "BULL", "score": weights["trend"]}
-        elif trend == "BEARISH":
-            bear_score += weights["trend"]
-            indicator_scores["trend"] = {"direction": "BEAR", "score": weights["trend"]}
-        elif trend == "WEAKENING_BEAR":
-            bull_score += weights["trend"] * 0.4
-            indicator_scores["trend"] = {"direction": "BULL", "score": round(weights["trend"] * 0.4, 1)}
-        elif trend == "WEAKENING_BULL":
-            bear_score += weights["trend"] * 0.4
-            indicator_scores["trend"] = {"direction": "BEAR", "score": round(weights["trend"] * 0.4, 1)}
+        # ADX trend gücü (±2)
+        adx_v = adx_result.get("adx") or 0
+        if adx_v >= 30 and adx_result.get("signal") == "BULLISH":
+            support_bonus += 2
+        elif adx_v >= 30 and adx_result.get("signal") == "BEARISH":
+            support_bonus -= 2
 
-        # ADX skoru
-        if adx_result.get("signal") == "BULLISH":
-            s = weights["adx"] * min(adx_val / 50, 1.0) if adx_val else 0
-            bull_score += s
-            indicator_scores["adx"] = {"direction": "BULL", "score": round(s, 1)}
-        elif adx_result.get("signal") == "BEARISH":
-            s = weights["adx"] * min(adx_val / 50, 1.0) if adx_val else 0
-            bear_score += s
-            indicator_scores["adx"] = {"direction": "BEAR", "score": round(s, 1)}
+        # S/R Risk/Reward (±5)
+        rr = sr_result.get("risk_reward")
+        sr_sig = sr_result.get("signal", "NEUTRAL")
+        if rr is not None:
+            if direction == "LONG":
+                if rr >= 3.0:
+                    support_bonus += 4
+                elif rr >= 2.0:
+                    support_bonus += 2
+                elif rr < 1.0:
+                    support_bonus -= 5  # R/R kötü — LONG cezalandır
+                elif rr < 1.5:
+                    support_bonus -= 3
+            elif direction == "SHORT":
+                inv_rr = 1.0 / rr if rr > 0 else 0
+                if inv_rr >= 3.0:
+                    support_bonus -= 4  # SHORT için iyi R/R
+                elif inv_rr >= 2.0:
+                    support_bonus -= 2
+                elif inv_rr < 1.0:
+                    support_bonus += 5  # SHORT için kötü R/R
+                elif inv_rr < 1.5:
+                    support_bonus += 3
+        # Direnç/destek yakınlık cezası
+        if sr_sig == "BEARISH" and direction == "LONG":
+            support_bonus -= 2  # Dirence yakınken LONG ceza
+        elif sr_sig == "BULLISH" and direction == "SHORT":
+            support_bonus += 2  # Desteğe yakınken SHORT ceza
 
-        # MACD skoru
-        if macd_result.get("signal_type") == "BULLISH":
-            bull_score += weights["macd"]
-            indicator_scores["macd"] = {"direction": "BULL", "score": weights["macd"]}
-        elif macd_result.get("signal_type") == "BEARISH":
-            bear_score += weights["macd"]
-            indicator_scores["macd"] = {"direction": "BEAR", "score": weights["macd"]}
-        elif macd_result.get("signal_type") == "WEAKENING_BULL":
-            bull_score += weights["macd"] * 0.3
-            indicator_scores["macd"] = {"direction": "BULL", "score": round(weights["macd"] * 0.3, 1)}
-        elif macd_result.get("signal_type") == "WEAKENING_BEAR":
-            bear_score += weights["macd"] * 0.3
-            indicator_scores["macd"] = {"direction": "BEAR", "score": round(weights["macd"] * 0.3, 1)}
+        # Bollinger (±2)
+        bb_sig = bb_result.get("signal", "NEUTRAL")
+        if bb_sig == "BULLISH":
+            support_bonus += 2
+        elif bb_sig == "BEARISH":
+            support_bonus -= 2
 
-        # RSI skoru
-        if rsi_result.get("signal") == "BULLISH":
-            bull_score += weights["rsi"]
-            indicator_scores["rsi"] = {"direction": "BULL", "score": weights["rsi"]}
-        elif rsi_result.get("signal") == "BEARISH":
-            bear_score += weights["rsi"]
-            indicator_scores["rsi"] = {"direction": "BEAR", "score": weights["rsi"]}
-
-        # StochRSI skoru
-        if stoch_result.get("signal") == "BULLISH":
-            bull_score += weights["stoch_rsi"]
-            indicator_scores["stoch_rsi"] = {"direction": "BULL", "score": weights["stoch_rsi"]}
-        elif stoch_result.get("signal") == "BEARISH":
-            bear_score += weights["stoch_rsi"]
-            indicator_scores["stoch_rsi"] = {"direction": "BEAR", "score": weights["stoch_rsi"]}
-
-        # Volume skoru (yönle birlikte)
-        if vol_result.get("signal") == "HIGH":
-            if trend in ("BULLISH", "WEAKENING_BEAR"):
-                bull_score += weights["volume"]
-                indicator_scores["volume"] = {"direction": "BULL", "score": weights["volume"]}
-            else:
-                bear_score += weights["volume"]
-                indicator_scores["volume"] = {"direction": "BEAR", "score": weights["volume"]}
-
-        # OBV skoru
-        if obv_result.get("signal") == "BULLISH":
-            bull_score += weights["obv"]
-            indicator_scores["obv"] = {"direction": "BULL", "score": weights["obv"]}
-        elif obv_result.get("signal") == "BEARISH":
-            bear_score += weights["obv"]
-            indicator_scores["obv"] = {"direction": "BEAR", "score": weights["obv"]}
-
-        # Bollinger skoru
-        if bb_result.get("signal") == "BULLISH":
-            bull_score += weights["bollinger"]
-            indicator_scores["bollinger"] = {"direction": "BULL", "score": weights["bollinger"]}
-        elif bb_result.get("signal") == "BEARISH":
-            bear_score += weights["bollinger"]
-            indicator_scores["bollinger"] = {"direction": "BEAR", "score": weights["bollinger"]}
-
-        # FVG skoru
-        if fvg_result.get("signal") == "BULLISH":
-            bull_score += weights["fvg"]
-            indicator_scores["fvg"] = {"direction": "BULL", "score": weights["fvg"]}
-        elif fvg_result.get("signal") == "BEARISH":
-            bear_score += weights["fvg"]
-            indicator_scores["fvg"] = {"direction": "BEAR", "score": weights["fvg"]}
-
-        # Diverjans skoru — contrarian sinyal
+        # Diverjans (önemli contrarian sinyal, ±3)
         if div_result.get("type") == "BULLISH":
-            bull_score += weights["divergence"]
-            indicator_scores["divergence"] = {"direction": "BULL", "score": weights["divergence"]}
+            support_bonus += 3
         elif div_result.get("type") == "BEARISH":
-            bear_score += weights["divergence"]
-            indicator_scores["divergence"] = {"direction": "BEAR", "score": weights["divergence"]}
+            support_bonus -= 3
 
-        total_possible = sum(weights.values())  # 100
-        confidence = round(max(bull_score, bear_score), 1)
-        net_score = round(bull_score - bear_score, 1)
+        # Bonusu sınırla
+        support_bonus = max(-15, min(15, support_bonus))
 
-        # Verdict belirleme
-        if net_score >= 40:
+        # ════════════ TOPLAM SKOR HESAPLA ════════════
+        # Bull tarafı
+        bull_total = 0
+        bear_total = 0
+
+        if direction == "LONG":
+            bull_total = dc_score + vd_score + (flow_score if flow_direction == "BULL" else 0) + max(support_bonus, 0)
+            bear_total = (flow_score if flow_direction == "BEAR" else 0) + abs(min(support_bonus, 0))
+        elif direction == "SHORT":
+            bear_total = dc_score + vd_score + (flow_score if flow_direction == "BEAR" else 0) + abs(min(support_bonus, 0))
+            bull_total = (flow_score if flow_direction == "BULL" else 0) + max(support_bonus, 0)
+        else:
+            # Yön yok — sadece VWAP/DPO ve para akışı bilgilendirici
+            if flow_direction == "BULL":
+                bull_total = vd_score * 0.3 + flow_score + max(support_bonus, 0)
+            elif flow_direction == "BEAR":
+                bear_total = vd_score * 0.3 + flow_score + abs(min(support_bonus, 0))
+            else:
+                bull_total = vd_score * 0.15
+                bear_total = vd_score * 0.15
+
+        net_score = round(bull_total - bear_total, 1)
+        confidence = round(max(bull_total, bear_total), 1)
+
+        # ════════════ VERDİCT ════════════
+        if net_score >= 60:
             verdict = "STRONG_BULLISH"
-            verdict_label = "GÜÇLÜ BOĞA"
+            verdict_label = "GÜÇLÜ LONG ✅"
             verdict_color = "green"
-        elif net_score >= 20:
+        elif net_score >= 35:
             verdict = "BULLISH"
-            verdict_label = "BOĞA"
+            verdict_label = "LONG"
             verdict_color = "green"
-        elif net_score >= 8:
+        elif net_score >= 15:
             verdict = "LEANING_BULLISH"
-            verdict_label = "HAFİF BOĞA"
+            verdict_label = "HAFİF LONG"
             verdict_color = "lightgreen"
-        elif net_score <= -40:
+        elif net_score <= -60:
             verdict = "STRONG_BEARISH"
-            verdict_label = "GÜÇLÜ AYI"
+            verdict_label = "GÜÇLÜ SHORT ✅"
             verdict_color = "red"
-        elif net_score <= -20:
+        elif net_score <= -35:
             verdict = "BEARISH"
-            verdict_label = "AYI"
+            verdict_label = "SHORT"
             verdict_color = "red"
-        elif net_score <= -8:
+        elif net_score <= -15:
             verdict = "LEANING_BEARISH"
-            verdict_label = "HAFİF AYI"
+            verdict_label = "HAFİF SHORT"
             verdict_color = "orange"
         else:
             verdict = "NEUTRAL"
-            verdict_label = "NÖTR"
+            verdict_label = "BEKLE ⏳"
             verdict_color = "gray"
+
+        # Pillar puanları (UI'da göstermek için)
+        pillar_scores = {
+            "donchian": {"score": dc_score, "max": 35, "label": "Kırılım & Yön"},
+            "vwap_dpo": {"score": vd_score, "max": 35, "label": "Fiyat Makul mü?"},
+            "money_flow": {"score": flow_score, "max": 30, "direction": flow_direction, "label": "Para Akışı"},
+            "support_adj": {"score": support_bonus, "max": 15, "label": "Destek Göstergeler"},
+        }
 
         return {
             "timeframe": tf_label,
+            # Ana strateji göstergeleri
+            "donchian": donchian_result,
+            "vwap_dpo": vwap_dpo_result,
+            "cmf": cmf_result,
+            "mfi": mfi_result,
+            "obv": obv_result,
+            # Destek göstergeler
             "rsi": rsi_result,
             "stoch_rsi": stoch_result,
             "macd": macd_result,
             "bollinger": bb_result,
             "adx": adx_result,
             "atr": atr_result,
-            "obv": obv_result,
             "volume": vol_result,
             "fvg": fvg_result,
             "support_resistance": sr_result,
             "divergence": div_result,
-            "trend": trend,
-            "trend_label": trend_label,
-            "trend_desc": trend_desc,
-            "ema": {
-                "ema8": round(ema8_val, 8),
-                "ema21": round(ema21_val, 8),
-                "ema50": round(ema50_val, 8) if ema50_val else None,
-                "ema200": round(ema200_val, 8) if ema200_val else None,
-                "order": "BULL" if ema_order_bull else ("BEAR" if ema_order_bear else "MIXED")
-            },
+            # Strateji sonucu
+            "direction": direction,
             "verdict": verdict,
             "verdict_label": verdict_label,
             "verdict_color": verdict_color,
-            "bull_score": round(bull_score, 1),
-            "bear_score": round(bear_score, 1),
+            "bull_score": round(bull_total, 1),
+            "bear_score": round(bear_total, 1),
             "net_score": net_score,
             "confidence": confidence,
-            "indicator_scores": indicator_scores
+            "pillar_scores": pillar_scores,
         }
 
     try:
@@ -1373,6 +1641,97 @@ def api_coin_detail(symbol):
         except Exception:
             pass
 
+        # ── PİYASA VERİLERİ: Fonlama, Açık Faiz, Long/Short Ratio ──
+        market_data = {"funding": None, "open_interest": None, "long_short_ratio": None}
+        market_data_score = 0  # Genel karara katkı
+        try:
+            # Fonlama oranı
+            funding = data_fetcher.get_funding_rate(symbol)
+            if funding:
+                fr = funding["current"]
+                market_data["funding"] = {
+                    "current": round(fr, 4),
+                    "next": round(funding["next"], 4),
+                    "next_time": funding["next_time"],
+                }
+                if fr > 0.05:
+                    market_data["funding"]["signal"] = "BEARISH"
+                    market_data["funding"]["label"] = f"Yüksek Pozitif ({fr:.4f}%)"
+                    market_data["funding"]["desc"] = "Long'lar short'lara ödeme yapıyor. Aşırı long kalabalık — düşüş riski."
+                    market_data_score -= 3
+                elif fr > 0.01:
+                    market_data["funding"]["signal"] = "NEUTRAL"
+                    market_data["funding"]["label"] = f"Normal Pozitif ({fr:.4f}%)"
+                    market_data["funding"]["desc"] = "Hafif long ağırlıklı piyasa — normal koşullar."
+                elif fr < -0.05:
+                    market_data["funding"]["signal"] = "BULLISH"
+                    market_data["funding"]["label"] = f"Yüksek Negatif ({fr:.4f}%)"
+                    market_data["funding"]["desc"] = "Short'lar long'lara ödeme yapıyor. Aşırı short kalabalık — yükseliş riski."
+                    market_data_score += 3
+                elif fr < -0.01:
+                    market_data["funding"]["signal"] = "NEUTRAL"
+                    market_data["funding"]["label"] = f"Normal Negatif ({fr:.4f}%)"
+                    market_data["funding"]["desc"] = "Hafif short ağırlıklı — normal koşullar."
+                else:
+                    market_data["funding"]["signal"] = "NEUTRAL"
+                    market_data["funding"]["label"] = f"Nötr ({fr:.4f}%)"
+                    market_data["funding"]["desc"] = "Fonlama dengesinde — piyasa tarafsız."
+
+            # Açık faiz
+            oi = data_fetcher.get_open_interest(symbol)
+            if oi and oi["oi"] > 0:
+                oi_usdt = oi["oi_usdt"]
+                oi_text = f"${oi_usdt/1_000_000:.1f}M" if oi_usdt >= 1_000_000 else f"${oi_usdt:,.0f}"
+                market_data["open_interest"] = {
+                    "value": oi["oi"],
+                    "usdt": oi_usdt,
+                    "display": oi_text,
+                    "signal": "NEUTRAL",
+                    "label": oi_text,
+                    "desc": f"Açık pozisyon: {oi_text}. Yüksek OI + fiyat artışı = sağlıklı trend. Yüksek OI + düşüş = tasfiye riski."
+                }
+
+            # Long/Short oranı
+            lsr = data_fetcher.get_long_short_ratio(symbol)
+            if lsr:
+                market_data["long_short_ratio"] = {}
+                for period_key, ratio in lsr.items():
+                    if ratio is None:
+                        continue
+                    long_pct = round(ratio / (1 + ratio) * 100, 1)
+                    short_pct = round(100 - long_pct, 1)
+                    if ratio > 2.0:
+                        sig = "BEARISH"
+                        lbl = f"Aşırı Long ({ratio:.2f})"
+                        desc = f"Long %{long_pct} / Short %{short_pct} — Aşırı long kalabalık, tasfiye riski."
+                        if period_key == "1D":
+                            market_data_score -= 2
+                    elif ratio > 1.3:
+                        sig = "NEUTRAL"
+                        lbl = f"Long Ağırlıklı ({ratio:.2f})"
+                        desc = f"Long %{long_pct} / Short %{short_pct} — Hafif long baskın."
+                    elif ratio < 0.5:
+                        sig = "BULLISH"
+                        lbl = f"Aşırı Short ({ratio:.2f})"
+                        desc = f"Long %{long_pct} / Short %{short_pct} — Aşırı short kalabalık, short squeeze riski."
+                        if period_key == "1D":
+                            market_data_score += 2
+                    elif ratio < 0.75:
+                        sig = "NEUTRAL"
+                        lbl = f"Short Ağırlıklı ({ratio:.2f})"
+                        desc = f"Long %{long_pct} / Short %{short_pct} — Hafif short baskın."
+                    else:
+                        sig = "NEUTRAL"
+                        lbl = f"Dengeli ({ratio:.2f})"
+                        desc = f"Long %{long_pct} / Short %{short_pct} — Piyasa dengesinde."
+
+                    market_data["long_short_ratio"][period_key] = {
+                        "ratio": ratio, "long_pct": long_pct, "short_pct": short_pct,
+                        "signal": sig, "label": lbl, "desc": desc
+                    }
+        except Exception as e:
+            logger.debug(f"Piyasa verileri hatası ({symbol}): {e}")
+
         # ── GELİŞMİŞ GENEL YORUM (Ağırlıklı TF Kombinasyonu) ──
         # 4H: %50, 1H: %30, 15m: %20 ağırlık
         tf_weights = {"4H": 0.50, "1H": 0.30, "15m": 0.20}
@@ -1399,11 +1758,70 @@ def api_coin_detail(symbol):
         bear_set = {"STRONG_BEARISH", "BEARISH", "LEANING_BEARISH"}
         tf_conflict = (v_4h in bull_set and v_15m in bear_set) or (v_4h in bear_set and v_15m in bull_set)
 
+        # ── MOMENTUM İVME ANALİZİ (Cross-TF MACD Histogram) ──
+        # Her TF'nin MACD histogram yönünü analiz et
+        momentum_accel = {"status": "NEUTRAL", "detail": "", "score_adj": 0}
+        try:
+            hist_data = {}
+            for tf_key in ["15m", "1H", "4H"]:
+                macd_info = tf_results[tf_key].get("macd", {})
+                sig_type = macd_info.get("signal_type", "NEUTRAL")
+                hist_val = macd_info.get("histogram")
+                hist_data[tf_key] = {"signal_type": sig_type, "histogram": hist_val}
+
+            h4_sig = hist_data["4H"]["signal_type"]
+            h1_sig = hist_data["1H"]["signal_type"]
+            m15_sig = hist_data["15m"]["signal_type"]
+
+            # İvme hızlanıyor: Tüm TF'lerde aynı yönde ve güçleniyor
+            bull_accel_types = {"BULLISH"}
+            bear_accel_types = {"BEARISH"}
+            bull_any = {"BULLISH", "WEAKENING_BULL"}
+            bear_any = {"BEARISH", "WEAKENING_BEAR"}
+
+            # Hızlanan boğa: 4H boğa + 1H boğa güçleniyor + 15m boğa
+            if h4_sig in bull_any and h1_sig in bull_accel_types and m15_sig in bull_accel_types:
+                momentum_accel = {"status": "BULL_ACCELERATING",
+                                  "detail": "Tüm TF'lerde momentum hızlanıyor ↑↑ — güçlü yükseliş ivmesi.",
+                                  "score_adj": 5}
+            # Hızlanan ayı: 4H ayı + 1H ayı güçleniyor + 15m ayı
+            elif h4_sig in bear_any and h1_sig in bear_accel_types and m15_sig in bear_accel_types:
+                momentum_accel = {"status": "BEAR_ACCELERATING",
+                                  "detail": "Tüm TF'lerde momentum düşüş yönünde hızlanıyor ↓↓ — güçlü satış ivmesi.",
+                                  "score_adj": -5}
+            # Zayıflayan boğa: 4H boğa ama 1H veya 15m zayıflıyor
+            elif h4_sig in bull_any and (h1_sig == "WEAKENING_BULL" or m15_sig == "WEAKENING_BEAR"):
+                momentum_accel = {"status": "BULL_FADING",
+                                  "detail": "4H boğa ama kısa vadede momentum zayıflıyor — geri çekilme riski.",
+                                  "score_adj": -3}
+            # Zayıflayan ayı: 4H ayı ama 1H veya 15m toparlanıyor
+            elif h4_sig in bear_any and (h1_sig == "WEAKENING_BEAR" or m15_sig == "WEAKENING_BULL"):
+                momentum_accel = {"status": "BEAR_FADING",
+                                  "detail": "4H ayı ama kısa vadede satış baskısı azalıyor — toparlanma olası.",
+                                  "score_adj": 3}
+            # Momentum dönüşü: 4H bir yönde ama 1H+15m ters yönde
+            elif h4_sig in bull_any and h1_sig in bear_accel_types and m15_sig in bear_accel_types:
+                momentum_accel = {"status": "BULL_REVERSAL_RISK",
+                                  "detail": "4H boğa ama 1H ve 15m düşüş ivmesinde — trend dönüşü riski!",
+                                  "score_adj": -4}
+            elif h4_sig in bear_any and h1_sig in bull_accel_types and m15_sig in bull_accel_types:
+                momentum_accel = {"status": "BEAR_REVERSAL_RISK",
+                                  "detail": "4H ayı ama 1H ve 15m yükseliş ivmesinde — dip oluşuyor olabilir.",
+                                  "score_adj": 4}
+        except Exception:
+            pass
+
         # Orderbook ekstra puan (azaltıldı: max ±2)
         if orderbook_result.get("signal") == "BULLISH":
             overall_net += 2
         elif orderbook_result.get("signal") == "BEARISH":
             overall_net -= 2
+
+        # Piyasa verileri ekstra puan (fonlama + long/short ratio)
+        overall_net += market_data_score
+
+        # Momentum ivme skoru
+        overall_net += momentum_accel["score_adj"]
 
         confluence_bonus = ""
         if all_bull and not tf_conflict:
@@ -1417,42 +1835,57 @@ def api_coin_detail(symbol):
             overall_net = round(overall_net, 1)
             confluence_bonus = " ⚠ 4H ve 15m zıt sinyaller veriyor — yön netleşene kadar temkinli olun."
 
+        # Momentum ivme bilgisini açıklamaya ekle
+        mom_note = ""
+        if momentum_accel["status"] != "NEUTRAL":
+            mom_note = f" 📈 İvme: {momentum_accel['detail']}"
+
+        # 4H piyasa rejimini belirle (açıklama için)
+        adx_4h = tf_results["4H"].get("adx", {})
+        adx_4h_val = adx_4h.get("adx")
+        regime_note = ""
+        if adx_4h_val is not None:
+            if adx_4h_val >= 25:
+                regime_note = " [Trend piyasası]"
+            elif adx_4h_val < 20:
+                regime_note = " [Yatay piyasa]"
+
         # Overall verdict — eşikler yükseltildi (false signal azaltmak için)
         if overall_net >= 30:
             overall = "STRONG_BULLISH"
             overall_label = "GÜÇLÜ BOĞA"
             overall_emoji = "🟢🟢"
-            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü yükseliş sinyali veriyor (skor: +{overall_net}).{confluence_bonus} Geri çekilmelerde LONG pozisyon değerlendirilebilir. Risk yönetimini ihmal etmeyin."
+            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü yükseliş sinyali veriyor (skor: +{overall_net}).{regime_note}{confluence_bonus}{mom_note} Geri çekilmelerde LONG pozisyon değerlendirilebilir. Risk yönetimini ihmal etmeyin."
         elif overall_net >= 15:
             overall = "BULLISH"
             overall_label = "BOĞA"
             overall_emoji = "🟢"
-            overall_desc = f"Göstergeler yükseliş yönünde ağırlıklı (skor: +{overall_net}).{confluence_bonus} Yükseliş eğilimi var ancak mutlaka 4H trend onayı kontrol edin."
+            overall_desc = f"Göstergeler yükseliş yönünde ağırlıklı (skor: +{overall_net}).{regime_note}{confluence_bonus}{mom_note} Yükseliş eğilimi var ancak mutlaka 4H trend onayı kontrol edin."
         elif overall_net >= 6:
             overall = "LEANING_BULLISH"
             overall_label = "HAFİF BOĞA"
             overall_emoji = "🟡"
-            overall_desc = f"Hafif boğa eğilimi (skor: +{overall_net}). Sinyal güçlü değil — tek başına pozisyon almak için yetersiz. 4H kapanışını ve hacim onayını bekleyin."
+            overall_desc = f"Hafif boğa eğilimi (skor: +{overall_net}).{regime_note}{mom_note} Sinyal güçlü değil — tek başına pozisyon almak için yetersiz. 4H kapanışını ve hacim onayını bekleyin."
         elif overall_net <= -30:
             overall = "STRONG_BEARISH"
             overall_label = "GÜÇLÜ AYI"
             overall_emoji = "🔴🔴"
-            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü düşüş sinyali veriyor (skor: {overall_net}).{confluence_bonus} Yükselişlerde SHORT düşünülebilir. SL mutlaka kullanın."
+            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü düşüş sinyali veriyor (skor: {overall_net}).{regime_note}{confluence_bonus}{mom_note} Yükselişlerde SHORT düşünülebilir. SL mutlaka kullanın."
         elif overall_net <= -15:
             overall = "BEARISH"
             overall_label = "AYI"
             overall_emoji = "🔴"
-            overall_desc = f"Göstergeler düşüş yönünde ağırlıklı (skor: {overall_net}).{confluence_bonus} Düşüş trendi aktif. LONG pozisyonlardan kaçının."
+            overall_desc = f"Göstergeler düşüş yönünde ağırlıklı (skor: {overall_net}).{regime_note}{confluence_bonus}{mom_note} Düşüş trendi aktif. LONG pozisyonlardan kaçının."
         elif overall_net <= -6:
             overall = "LEANING_BEARISH"
             overall_label = "HAFİF AYI"
             overall_emoji = "🟠"
-            overall_desc = f"Hafif ayı eğilimi (skor: {overall_net}). Sinyal güçlü değil — kesin yön için 4H trend ve hacim onayı bekleyin."
+            overall_desc = f"Hafif ayı eğilimi (skor: {overall_net}).{regime_note}{mom_note} Sinyal güçlü değil — kesin yön için 4H trend ve hacim onayı bekleyin."
         else:
             overall = "NEUTRAL"
             overall_label = "NÖTR"
             overall_emoji = "⚪"
-            overall_desc = f"Göstergeler karışık veya zayıf sinyal veriyor (skor: {overall_net}). Bu coin şu an net yön vermiyor — pozisyon almak yerine izlemeye alın."
+            overall_desc = f"Göstergeler karışık veya zayıf sinyal veriyor (skor: {overall_net}).{regime_note}{mom_note} Bu coin şu an net yön vermiyor — pozisyon almak yerine izlemeye alın."
 
         # Ek uyarılar
         warnings = []
@@ -1474,481 +1907,32 @@ def api_coin_detail(symbol):
         if abs(overall_net) < 10:
             warnings.append("ℹ Skor düşük — yüksek güvenli sinyal için daha fazla gösterge uyumu gerekli.")
 
-        # ── AI TRADİNG SENARYO MOTORU ──
-        def _generate_trading_scenario(tf_results, price_info, orderbook_result, overall_net, overall, warnings):
-            """
-            Tüm TF verilerini ve teknik analizi birleştirerek
-            detaylı long/short trading senaryosu üretir.
-            """
-            current_price = price_info.get("last", 0)
-            if not current_price:
-                return None
+        # Piyasa verileri uyarıları
+        if market_data.get("funding") and market_data["funding"].get("signal") == "BEARISH":
+            warnings.append(f"💰 Fonlama oranı yüksek ({market_data['funding']['current']:.4f}%) — aşırı long kalabalık, düşüş riski.")
+        elif market_data.get("funding") and market_data["funding"].get("signal") == "BULLISH":
+            warnings.append(f"💰 Fonlama oranı negatif ({market_data['funding']['current']:.4f}%) — aşırı short kalabalık, short squeeze riski.")
+        
+        lsr_1d = (market_data.get("long_short_ratio") or {}).get("1D")
+        if lsr_1d and lsr_1d.get("signal") == "BEARISH":
+            warnings.append(f"📊 L/S Ratio aşırı long ({lsr_1d['ratio']:.2f}) — tasfiye riski yüksek.")
+        elif lsr_1d and lsr_1d.get("signal") == "BULLISH":
+            warnings.append(f"📊 L/S Ratio aşırı short ({lsr_1d['ratio']:.2f}) — short squeeze olasılığı.")
 
-            # ─── Tüm TF'lerden veri topla ─── 
-            tf_4h = tf_results.get("4H", {})
-            tf_1h = tf_results.get("1H", {})
-            tf_15m = tf_results.get("15m", {})
-
-            # Trend bilgileri
-            trend_4h = tf_4h.get("trend", "UNKNOWN")
-            trend_1h = tf_1h.get("trend", "UNKNOWN")
-            trend_15m = tf_15m.get("trend", "UNKNOWN")
-
-            # EMA değerleri (4H ana referans)
-            ema_4h = tf_4h.get("ema", {})
-            ema_1h = tf_1h.get("ema", {})
-            ema_15m = tf_15m.get("ema", {})
-
-            ema8_4h = ema_4h.get("ema8")
-            ema21_4h = ema_4h.get("ema21")
-            ema50_4h = ema_4h.get("ema50")
-            ema200_4h = ema_4h.get("ema200")
-
-            # Destek/Direnç (4H ve 1H)
-            sr_4h = tf_4h.get("support_resistance", {})
-            sr_1h = tf_1h.get("support_resistance", {})
-            sr_15m = tf_15m.get("support_resistance", {})
-
-            support_4h = sr_4h.get("nearest_support")
-            resistance_4h = sr_4h.get("nearest_resistance")
-            support_1h = sr_1h.get("nearest_support")
-            resistance_1h = sr_1h.get("nearest_resistance")
-            support_15m = sr_15m.get("nearest_support")
-            resistance_15m = sr_15m.get("nearest_resistance")
-
-            # ATR (stop loss hesabı için)
-            atr_4h = tf_4h.get("atr", {})
-            atr_1h = tf_1h.get("atr", {})
-            atr_15m = tf_15m.get("atr", {})
-            atr_val_4h = atr_4h.get("atr", 0)
-            atr_val_1h = atr_1h.get("atr", 0)
-            atr_val_15m = atr_15m.get("atr", 0)
-            atr_pct_4h = atr_4h.get("atr_pct", 0)
-
-            # Bollinger
-            bb_4h = tf_4h.get("bollinger", {})
-            bb_1h = tf_1h.get("bollinger", {})
-            bb_upper_4h = bb_4h.get("upper", 0)
-            bb_lower_4h = bb_4h.get("lower", 0)
-            bb_middle_4h = bb_4h.get("middle", 0)
-            bb_squeeze_4h = bb_4h.get("squeeze_status", "")
-
-            # RSI değerleri
-            rsi_4h = tf_4h.get("rsi", {}).get("value", 50)
-            rsi_1h = tf_1h.get("rsi", {}).get("value", 50)
-            rsi_15m = tf_15m.get("rsi", {}).get("value", 50)
-
-            # MACD
-            macd_4h = tf_4h.get("macd", {})
-            macd_1h = tf_1h.get("macd", {})
-
-            # ADX
-            adx_4h = tf_4h.get("adx", {})
-            adx_val = adx_4h.get("adx", 0)
-
-            # Volume
-            vol_15m = tf_15m.get("volume", {})
-            vol_ratio = vol_15m.get("ratio", 1)
-
-            # FVG
-            fvg_15m = tf_15m.get("fvg", {})
-            fvg_1h = tf_1h.get("fvg", {})
-
-            # Diverjans
-            div_4h = tf_4h.get("divergence", {}).get("type", "NONE")
-            div_1h = tf_1h.get("divergence", {}).get("type", "NONE")
-
-            # Orderbook  
-            ob_signal = orderbook_result.get("signal", "NEUTRAL")
-            ob_imbalance = orderbook_result.get("imbalance", 50)
-
-            # ─── Verdict'leri belirle ───
-            v_4h = tf_4h.get("verdict", "NEUTRAL")
-            v_1h = tf_1h.get("verdict", "NEUTRAL")
-            v_15m = tf_15m.get("verdict", "NEUTRAL")
-
-            bull_verdicts = {"STRONG_BULLISH", "BULLISH", "LEANING_BULLISH"}
-            bear_verdicts = {"STRONG_BEARISH", "BEARISH", "LEANING_BEARISH"}
-
-            is_bull_4h = v_4h in bull_verdicts
-            is_bear_4h = v_4h in bear_verdicts
-            is_bull_1h = v_1h in bull_verdicts
-            is_bear_1h = v_1h in bear_verdicts
-            all_bull = v_4h in bull_verdicts and v_1h in bull_verdicts and v_15m in bull_verdicts
-            all_bear = v_4h in bear_verdicts and v_1h in bear_verdicts and v_15m in bear_verdicts
-
-            # ─── Fiyat formatı ─── 
-            def fmt(val):
-                if val is None or val == 0:
-                    return "N/A"
-                if val >= 1:
-                    return f"{val:.4f}"
-                elif val >= 0.001:
-                    return f"{val:.6f}"
-                else:
-                    return f"{val:.8f}"
-
-            # ─── Anahtar seviyeler ───
-            key_levels = []
-            if ema50_4h:
-                key_levels.append(("4H EMA50", ema50_4h))
-            if ema200_4h:
-                key_levels.append(("4H EMA200", ema200_4h))
-            if bb_upper_4h:
-                key_levels.append(("BB Üst", bb_upper_4h))
-            if bb_lower_4h:
-                key_levels.append(("BB Alt", bb_lower_4h))
-            if bb_middle_4h:
-                key_levels.append(("BB Orta", bb_middle_4h))
-            if support_4h:
-                key_levels.append(("4H Destek", support_4h))
-            if resistance_4h:
-                key_levels.append(("4H Direnç", resistance_4h))
-            if support_1h:
-                key_levels.append(("1H Destek", support_1h))
-            if resistance_1h:
-                key_levels.append(("1H Direnç", resistance_1h))
-
-            # ─── LONG SENARYO ─── 
-            long_scenario = {"quality": 0, "sections": []}
-
-            if is_bull_4h:
-                long_scenario["quality"] += 35
-            elif v_4h == "NEUTRAL":
-                long_scenario["quality"] += 10
-            if is_bull_1h:
-                long_scenario["quality"] += 25
-            if v_15m in bull_verdicts:
-                long_scenario["quality"] += 15
-            if ob_signal == "BULLISH":
-                long_scenario["quality"] += 8
-            if div_4h == "BULLISH" or div_1h == "BULLISH":
-                long_scenario["quality"] += 12
-            if all_bull:
-                long_scenario["quality"] += 5
-
-            # Piyasa bağlamı
-            ctx_lines = []
-            ctx_lines.append(f"4H Trend: {'Yükseliş ✅' if trend_4h == 'BULLISH' else 'Düşüş ❌' if trend_4h == 'BEARISH' else 'Zayıflıyor ⚠'}")
-            ctx_lines.append(f"1H Trend: {'Yükseliş ✅' if trend_1h == 'BULLISH' else 'Düşüş ❌' if trend_1h == 'BEARISH' else 'Zayıflıyor ⚠'}")
-            ctx_lines.append(f"15m Trend: {'Yükseliş ✅' if trend_15m == 'BULLISH' else 'Düşüş ❌' if trend_15m == 'BEARISH' else 'Zayıflıyor ⚠'}")
-            if rsi_4h:
-                ctx_lines.append(f"RSI: 4H={rsi_4h:.0f} | 1H={rsi_1h:.0f} | 15m={rsi_15m:.0f}")
-            if adx_val:
-                adx_text = "Güçlü" if adx_val > 25 else "Zayıf"
-                ctx_lines.append(f"Trend Gücü (ADX): {adx_val:.0f} — {adx_text}")
-            long_scenario["sections"].append({"title": "📊 Piyasa Bağlamı", "lines": ctx_lines})
-
-            # Giriş koşulları
-            entry_lines = []
-            if is_bull_4h and is_bull_1h:
-                # İdeal senaryo: 4H+1H uyumlu
-                if support_1h and current_price > support_1h:
-                    pullback_zone = support_1h * 1.005  # %0.5 üstü
-                    entry_lines.append(f"🎯 İdeal Giriş: Fiyat {fmt(support_1h)} - {fmt(pullback_zone)} destek bölgesine geri çekildiğinde")
-                    entry_lines.append(f"Bu bölgede 15m mumun kapanışını bekleyin (en az 2 mum yeşil kapansın)")
-                if ema21_4h and current_price > ema21_4h:
-                    entry_lines.append(f"Alternatif: 4H EMA21 ({fmt(ema21_4h)}) testinde tepki alımda giriş")
-                if not entry_lines:
-                    entry_lines.append(f"Mevcut fiyat ({fmt(current_price)}) seviyesinde 15m'de yeşil mum onayı ile giriş değerlendirilebilir")
-            elif is_bull_4h and not is_bull_1h:
-                entry_lines.append(f"⏳ 4H boğa ama 1H henüz onaylamamış — 1H'de EMA8>EMA21 geçişini bekleyin")
-                if ema_1h.get("ema21"):
-                    entry_lines.append(f"1H EMA21: {fmt(ema_1h['ema21'])} — fiyat bunun üzerine kapanmalı")
-                entry_lines.append(f"Erken giriş: 15m'de art arda 3 yeşil mum kapanışı + artan hacim ile giriş denenebilir")
-            elif not is_bull_4h:
-                entry_lines.append(f"⚠ 4H trend henüz boğa değil — yüksek risk")
-                if support_4h:
-                    entry_lines.append(f"Sadece {fmt(support_4h)} güçlü 4H desteğinde tepki alım denenebilir")
-                entry_lines.append(f"En az 2 adet 15m mum bu seviyede kapanmalı (wick rejection)")
-                if div_4h == "BULLISH" or div_1h == "BULLISH":
-                    entry_lines.append(f"✨ Boğa diverjansı tespit edildi — erken dönüş sinyali, dikkatli izleyin")
-
-            # Bollinger/FVG ekstra
-            if bb_squeeze_4h == "DARALIYOR":
-                entry_lines.append(f"🔥 Bollinger sıkışması var — patlama aşağı veya yukarı olabilir, yön onayı bekleyin")
-            if fvg_1h.get("signal") == "BULLISH" and fvg_1h.get("unfilled_bullish", 0) > 0:
-                entry_lines.append(f"📐 1H'de doldurulmamış Boğa FVG var — bu bölge likidite çeker, geri çekilmede giriş noktası")
-
-            long_scenario["sections"].append({"title": "🟢 Giriş Koşulları", "lines": entry_lines})
-
-            # Stop Loss
-            sl_lines = []
-            if support_1h:
-                sl_price = support_1h * 0.995  # Destek altı %0.5
-                sl_pct = abs((current_price - sl_price) / current_price * 100)
-                sl_lines.append(f"Agresif SL: {fmt(sl_price)} (1H destek altı, -%{sl_pct:.1f})")
-            if support_4h and support_4h < current_price:
-                sl_price_safe = support_4h * 0.99  # 4H destek altı %1
-                sl_pct_safe = abs((current_price - sl_price_safe) / current_price * 100)
-                sl_lines.append(f"Güvenli SL: {fmt(sl_price_safe)} (4H destek altı, -%{sl_pct_safe:.1f})")
-            if atr_val_1h:
-                sl_atr = current_price - (atr_val_1h * 1.5)
-                sl_pct_atr = abs((current_price - sl_atr) / current_price * 100)
-                sl_lines.append(f"ATR Bazlı SL: {fmt(sl_atr)} (1.5x ATR, -%{sl_pct_atr:.1f})")
-            if not sl_lines:
-                sl_lines.append(f"ATR bazlı SL önerilir: Mevcut fiyattan 1.5-2x ATR altı")
-            long_scenario["sections"].append({"title": "🛑 Stop Loss", "lines": sl_lines})
-
-            # Target (TP)
-            tp_lines = []
-            if resistance_1h:
-                tp_pct = abs((resistance_1h - current_price) / current_price * 100)
-                tp_lines.append(f"TP1: {fmt(resistance_1h)} (1H direnç, +%{tp_pct:.1f})")
-            if resistance_4h and resistance_4h != resistance_1h:
-                tp_pct2 = abs((resistance_4h - current_price) / current_price * 100)
-                tp_lines.append(f"TP2: {fmt(resistance_4h)} (4H direnç, +%{tp_pct2:.1f})")
-            if bb_upper_4h and bb_upper_4h > current_price:
-                tp_pct3 = abs((bb_upper_4h - current_price) / current_price * 100)
-                tp_lines.append(f"TP3: {fmt(bb_upper_4h)} (BB üst bant, +%{tp_pct3:.1f})")
-            if ema200_4h and ema200_4h > current_price * 1.02:
-                tp_pct4 = abs((ema200_4h - current_price) / current_price * 100)
-                tp_lines.append(f"Uzun Vadeli: {fmt(ema200_4h)} (4H EMA200, +%{tp_pct4:.1f})")
-            if not tp_lines:
-                if atr_val_1h:
-                    tp_auto = current_price + (atr_val_1h * 3)
-                    tp_lines.append(f"TP: {fmt(tp_auto)} (3x ATR hedef)")
-            long_scenario["sections"].append({"title": "🎯 Hedef (Take Profit)", "lines": tp_lines})
-
-            # R:R hesabı
-            rr_lines = []
-            best_sl = None
-            best_tp = None
-            if support_1h:
-                best_sl = support_1h * 0.995
-            elif atr_val_1h:
-                best_sl = current_price - (atr_val_1h * 1.5)
-            if resistance_1h:
-                best_tp = resistance_1h
-            elif resistance_4h:
-                best_tp = resistance_4h
-
-            if best_sl and best_tp and best_sl < current_price < best_tp:
-                risk = current_price - best_sl
-                reward = best_tp - current_price
-                rr = reward / risk if risk > 0 else 0
-                rr_lines.append(f"Risk: {fmt(risk)} ({abs(risk/current_price*100):.1f}%) | Ödül: {fmt(reward)} ({abs(reward/current_price*100):.1f}%)")
-                rr_lines.append(f"Risk:Ödül = 1:{rr:.1f} {'✅ Uygun' if rr >= 2 else '⚠ Düşük (min 1:2 önerilir)'}")
-            long_scenario["sections"].append({"title": "📐 Risk/Ödül", "lines": rr_lines})
-
-            # ─── SHORT SENARYO ─── 
-            short_scenario = {"quality": 0, "sections": []}
-
-            if is_bear_4h:
-                short_scenario["quality"] += 35
-            elif v_4h == "NEUTRAL":
-                short_scenario["quality"] += 10
-            if is_bear_1h:
-                short_scenario["quality"] += 25
-            if v_15m in bear_verdicts:
-                short_scenario["quality"] += 15
-            if ob_signal == "BEARISH":
-                short_scenario["quality"] += 8
-            if div_4h == "BEARISH" or div_1h == "BEARISH":
-                short_scenario["quality"] += 12
-            if all_bear:
-                short_scenario["quality"] += 5
-
-            # Short giriş
-            s_entry = []
-            if is_bear_4h and is_bear_1h:
-                if resistance_1h and current_price < resistance_1h:
-                    pullback_zone = resistance_1h * 0.995
-                    s_entry.append(f"🎯 İdeal Giriş: Fiyat {fmt(pullback_zone)} - {fmt(resistance_1h)} direnç bölgesine çekildiğinde")
-                    s_entry.append(f"Bu bölgede 15m mumun kapanışını bekleyin (en az 2 mum kırmızı kapansın)")
-                if ema21_4h and current_price < ema21_4h:
-                    s_entry.append(f"Alternatif: 4H EMA21 ({fmt(ema21_4h)}) ret sinyalinde short giriş")
-                if not s_entry:
-                    s_entry.append(f"Mevcut fiyat ({fmt(current_price)}) seviyesinde 15m'de kırmızı mum onayı ile short değerlendirilebilir")
-            elif is_bear_4h and not is_bear_1h:
-                s_entry.append(f"⏳ 4H ayı ama 1H henüz onaylamamış — 1H'de EMA8<EMA21 geçişini bekleyin")
-                if ema_1h.get("ema21"):
-                    s_entry.append(f"1H EMA21: {fmt(ema_1h['ema21'])} — fiyat bunun altına kapanmalı")
-                s_entry.append(f"Erken giriş: 15m'de art arda 3 kırmızı mum + artan hacim ile short denenebilir")
-            elif not is_bear_4h:
-                s_entry.append(f"⚠ 4H trend henüz ayı değil — yüksek risk")
-                if resistance_4h:
-                    s_entry.append(f"Sadece {fmt(resistance_4h)} güçlü 4H dirençte ret satış denenebilir")
-                s_entry.append(f"En az 2 adet 15m mum bu seviyede kapanmalı (üst wick rejection)")
-                if div_4h == "BEARISH" or div_1h == "BEARISH":
-                    s_entry.append(f"✨ Ayı diverjansı tespit edildi — trend dönüşünün erken sinyali")
-
-            if bb_squeeze_4h == "DARALIYOR":
-                s_entry.append(f"🔥 Bollinger sıkışması — kırılım bekleyin, erken girmeyin")
-            if fvg_1h.get("signal") == "BEARISH" and fvg_1h.get("unfilled_bearish", 0) > 0:
-                s_entry.append(f"📐 1H'de doldurulmamış Ayı FVG — yükselişte short giriş noktası")
-
-            short_scenario["sections"].append({"title": "🔴 Giriş Koşulları", "lines": s_entry})
-
-            # Short SL
-            s_sl = []
-            if resistance_1h:
-                sl_price = resistance_1h * 1.005
-                sl_pct = abs((sl_price - current_price) / current_price * 100)
-                s_sl.append(f"Agresif SL: {fmt(sl_price)} (1H direnç üstü, +%{sl_pct:.1f})")
-            if resistance_4h and resistance_4h > current_price:
-                sl_price_safe = resistance_4h * 1.01
-                sl_pct_safe = abs((sl_price_safe - current_price) / current_price * 100)
-                s_sl.append(f"Güvenli SL: {fmt(sl_price_safe)} (4H direnç üstü, +%{sl_pct_safe:.1f})")
-            if atr_val_1h:
-                sl_atr = current_price + (atr_val_1h * 1.5)
-                sl_pct_atr = abs((sl_atr - current_price) / current_price * 100)
-                s_sl.append(f"ATR Bazlı SL: {fmt(sl_atr)} (1.5x ATR, +%{sl_pct_atr:.1f})")
-            if not s_sl:
-                s_sl.append(f"ATR bazlı SL önerilir: Mevcut fiyattan 1.5-2x ATR üstü")
-            short_scenario["sections"].append({"title": "🛑 Stop Loss", "lines": s_sl})
-
-            # Short TP
-            s_tp = []
-            if support_1h:
-                tp_pct = abs((current_price - support_1h) / current_price * 100)
-                s_tp.append(f"TP1: {fmt(support_1h)} (1H destek, +%{tp_pct:.1f})")
-            if support_4h and support_4h != support_1h:
-                tp_pct2 = abs((current_price - support_4h) / current_price * 100)
-                s_tp.append(f"TP2: {fmt(support_4h)} (4H destek, +%{tp_pct2:.1f})")
-            if bb_lower_4h and bb_lower_4h < current_price:
-                tp_pct3 = abs((current_price - bb_lower_4h) / current_price * 100)
-                s_tp.append(f"TP3: {fmt(bb_lower_4h)} (BB alt bant, +%{tp_pct3:.1f})")
-            if not s_tp:
-                if atr_val_1h:
-                    tp_auto = current_price - (atr_val_1h * 3)
-                    s_tp.append(f"TP: {fmt(tp_auto)} (3x ATR hedef)")
-            short_scenario["sections"].append({"title": "🎯 Hedef (Take Profit)", "lines": s_tp})
-
-            # Short R:R
-            s_rr = []
-            best_sl_s = None
-            best_tp_s = None
-            if resistance_1h:
-                best_sl_s = resistance_1h * 1.005
-            elif atr_val_1h:
-                best_sl_s = current_price + (atr_val_1h * 1.5)
-            if support_1h:
-                best_tp_s = support_1h
-            elif support_4h:
-                best_tp_s = support_4h
-
-            if best_sl_s and best_tp_s and best_tp_s < current_price < best_sl_s:
-                risk = best_sl_s - current_price
-                reward = current_price - best_tp_s
-                rr = reward / risk if risk > 0 else 0
-                s_rr.append(f"Risk: {fmt(risk)} ({abs(risk/current_price*100):.1f}%) | Ödül: {fmt(reward)} ({abs(reward/current_price*100):.1f}%)")
-                s_rr.append(f"Risk:Ödül = 1:{rr:.1f} {'✅ Uygun' if rr >= 2 else '⚠ Düşük (min 1:2 önerilir)'}")
-            short_scenario["sections"].append({"title": "📐 Risk/Ödül", "lines": s_rr})
-
-            # ─── GENEL STRATEJİ ÖNERİSİ ─── 
-            strategy_lines = []
-
-            # Ana yön belirleme
-            if overall_net >= 30:
-                strategy_lines.append("🟢 GÜÇLÜ LONG ÖNCELİKLİ — Tüm göstergeler yükseliş destekliyor.")
-                strategy_lines.append("Geri çekilmeleri alım fırsatı olarak değerlendirin.")
-                recommended = "LONG"
-            elif overall_net >= 15:
-                strategy_lines.append("🟢 LONG ÖNCELİKLİ — Yükseliş trendi aktif.")
-                strategy_lines.append("Short riskli. Sadece önemli dirençlerde kısa vadeli short denenebilir.")
-                recommended = "LONG"
-            elif overall_net >= 6:
-                strategy_lines.append("🟡 HAFİF LONG EĞİLİMLİ — Sinyal güçlü değil.")
-                strategy_lines.append("Pozisyon almak için ek onay (hacim artışı, mum kapanışı) bekleyin.")
-                recommended = "LONG_CAUTIOUS"
-            elif overall_net <= -30:
-                strategy_lines.append("🔴 GÜÇLÜ SHORT ÖNCELİKLİ — Tüm göstergeler düşüş destekliyor.")
-                strategy_lines.append("Yükselişleri satış fırsatı olarak değerlendirin.")
-                recommended = "SHORT"
-            elif overall_net <= -15:
-                strategy_lines.append("🔴 SHORT ÖNCELİKLİ — Düşüş trendi aktif.")
-                strategy_lines.append("Long riskli. Sadece güçlü desteklerde tepki alım denenebilir.")
-                recommended = "SHORT"
-            elif overall_net <= -6:
-                strategy_lines.append("🟠 HAFİF SHORT EĞİLİMLİ — Sinyal güçlü değil.")
-                strategy_lines.append("Net kırılım olmadan short girmeyin, 4H mum kapanışı bekleyin.")
-                recommended = "SHORT_CAUTIOUS"
-            else:
-                strategy_lines.append("⚪ NÖTR — Piyasa yön vermiyor.")
-                strategy_lines.append("Pozisyon almak riskli. Kenarda kalıp net sinyal bekleyin.")
-                recommended = "WAIT"
-
-            # Önemli uyarılar
-            if atr_pct_4h and atr_pct_4h > 5:
-                strategy_lines.append(f"⚡ Yüksek volatilite (%{atr_pct_4h:.1f}) — Pozisyon boyutunu %50 küçültün.")
-            if rsi_4h and rsi_4h > 75:
-                strategy_lines.append(f"⚠ 4H RSI aşırı alım ({rsi_4h:.0f}) — Long'da dikkatli olun, geri çekilme yakın.")
-            elif rsi_4h and rsi_4h < 25:
-                strategy_lines.append(f"⚠ 4H RSI aşırı satım ({rsi_4h:.0f}) — Short'da dikkatli olun, bouncing yakın.")
-
-            if vol_ratio and vol_ratio < 0.5:
-                strategy_lines.append("📉 Düşük hacim — Breakout'lar güvenilmez, tuzak olabilir.")
-            elif vol_ratio and vol_ratio > 2:
-                strategy_lines.append("📈 Yüksek hacim — Hareket güçlü, trend devam edebilir.")
-
-            if bb_squeeze_4h == "DARALIYOR":
-                strategy_lines.append("🔥 4H Bollinger sıkışması — Büyük bir hareket yaklaşıyor, yön belli olana kadar bekleyin.")
-
-            # Bekleme stratejisi detayı
-            wait_lines = []
-            if recommended == "LONG" or recommended == "LONG_CAUTIOUS":
-                if support_1h:
-                    wait_lines.append(f"📍 Beklenen geri çekilme bölgesi: {fmt(support_1h)} civarı")
-                wait_lines.append("✅ Giriş onayı: 15m'de en az 2 yeşil mum kapanışı + MACD histogram pozitife dönmeli")
-                wait_lines.append("✅ Hacim onayı: Son mumların hacmi 20-periyot ortalamasının üzerinde olmalı")
-                if ema_15m.get("ema8") and ema_15m.get("ema21"):
-                    wait_lines.append(f"✅ EMA onayı: 15m EMA8 ({fmt(ema_15m['ema8'])}) > EMA21 ({fmt(ema_15m['ema21'])}) kalmalı")
-            elif recommended == "SHORT" or recommended == "SHORT_CAUTIOUS":
-                if resistance_1h:
-                    wait_lines.append(f"📍 Beklenen çekilme bölgesi: {fmt(resistance_1h)} civarı")
-                wait_lines.append("✅ Giriş onayı: 15m'de en az 2 kırmızı mum kapanışı + MACD histogram negatife dönmeli")
-                wait_lines.append("✅ Hacim onayı: Son mumların hacmi 20-periyot ortalamasının üzerinde olmalı")
-                if ema_15m.get("ema8") and ema_15m.get("ema21"):
-                    wait_lines.append(f"✅ EMA onayı: 15m EMA8 ({fmt(ema_15m['ema8'])}) < EMA21 ({fmt(ema_15m['ema21'])}) kalmalı")
-            else:
-                wait_lines.append("⏸ Şu an pozisyon almak riskli — aşağıdaki seviyelerden birinin kırılmasını bekleyin:")
-                if resistance_1h:
-                    wait_lines.append(f"  Yukarı kırılım: {fmt(resistance_1h)} üzeri kapanış → LONG sinyali")
-                if support_1h:
-                    wait_lines.append(f"  Aşağı kırılım: {fmt(support_1h)} altı kapanış → SHORT sinyali")
-
-            # Anahtar seviyeler tablosu
-            levels = []
-            if resistance_4h:
-                levels.append({"name": "4H Direnç", "price": resistance_4h, "type": "resistance"})
-            if resistance_1h:
-                levels.append({"name": "1H Direnç", "price": resistance_1h, "type": "resistance"})
-            if bb_upper_4h and bb_upper_4h > current_price:
-                levels.append({"name": "BB Üst", "price": bb_upper_4h, "type": "resistance"})
-            if ema50_4h and ema50_4h > current_price:
-                levels.append({"name": "4H EMA50", "price": ema50_4h, "type": "resistance"})
-            if ema50_4h and ema50_4h < current_price:
-                levels.append({"name": "4H EMA50", "price": ema50_4h, "type": "support"})
-            if support_1h:
-                levels.append({"name": "1H Destek", "price": support_1h, "type": "support"})
-            if support_4h:
-                levels.append({"name": "4H Destek", "price": support_4h, "type": "support"})
-            if bb_lower_4h and bb_lower_4h < current_price:
-                levels.append({"name": "BB Alt", "price": bb_lower_4h, "type": "support"})
-
-            # Seviyeleri sırala (yüksekten düşüğe)
-            levels.sort(key=lambda x: x["price"], reverse=True)
-
-            return {
-                "recommended": recommended,
-                "long": long_scenario,
-                "short": short_scenario,
-                "strategy": strategy_lines,
-                "wait_conditions": wait_lines,
-                "key_levels": [{"name": l["name"], "price": fmt(l["price"]), "price_raw": l["price"], "type": l["type"]} for l in levels],
-                "current_price": current_price,
-                "current_price_fmt": fmt(current_price)
-            }
-
-        # Senaryo üret
-        scenario = _generate_trading_scenario(tf_results, price_info, orderbook_result, overall_net, overall, warnings)
+        # Momentum ivme uyarıları
+        if momentum_accel["status"] in ("BULL_FADING", "BEAR_FADING"):
+            warnings.append(f"📉 {momentum_accel['detail']}")
+        elif momentum_accel["status"] in ("BULL_REVERSAL_RISK", "BEAR_REVERSAL_RISK"):
+            warnings.append(f"🔄 {momentum_accel['detail']}")
+        elif momentum_accel["status"] in ("BULL_ACCELERATING", "BEAR_ACCELERATING"):
+            warnings.append(f"🚀 {momentum_accel['detail']}")
 
         response = {
             "symbol": symbol,
             "price": price_info,
             "timeframes": tf_results,
             "orderbook": orderbook_result,
+            "market_data": market_data,
             "overall": {
                 "verdict": overall,
                 "label": f"{overall_emoji} {overall_label}",
@@ -1957,10 +1941,14 @@ def api_coin_detail(symbol):
                 "bull_total": round(total_bull, 1),
                 "bear_total": round(total_bear, 1),
                 "confidence": overall_confidence,
+                "direction": "LONG" if overall_net >= 15 else ("SHORT" if overall_net <= -15 else "NONE"),
+                "verdict_color": "green" if overall_net >= 15 else ("red" if overall_net <= -15 else ("orange" if abs(overall_net) >= 6 else "gray")),
                 "warnings": warnings,
-                "tf_confluence": "ALL_BULL" if all_bull else ("ALL_BEAR" if all_bear else "MIXED")
+                "tf_confluence": "ALL_BULL" if all_bull else ("ALL_BEAR" if all_bear else "MIXED"),
+                "momentum": momentum_accel["status"],
+                "momentum_detail": momentum_accel["detail"] if momentum_accel["status"] != "NEUTRAL" else None,
+                "market_regime": regime_note.strip(" []") if regime_note else "Normal"
             },
-            "scenario": scenario,
             "timestamp": datetime.now().isoformat()
         }
 
@@ -1972,7 +1960,6 @@ def api_coin_detail(symbol):
             return str(obj)
 
         return jsonify(json.loads(json.dumps(response, default=serialize)))
-
     except Exception as e:
         logger.error(f"Coin detay hatası ({symbol}): {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -1985,422 +1972,6 @@ def api_ticker(symbol):
     if ticker:
         return jsonify(ticker)
     return jsonify({"error": "Fiyat alınamadı"}), 400
-
-
-@app.route("/api/backtest/<symbol>")
-def api_backtest(symbol):
-    """
-    Strateji backtest: Geçmiş mum verilerinde sinyalleri simüle ederek 
-    win rate, PnL, R:R ve trade detayları döndürür.
-    """
-    import numpy as np
-    import pandas as pd
-
-    tf = request.args.get("tf", "1H")
-    limit = min(int(request.args.get("limit", 300)), 300)
-    min_score = int(request.args.get("min_score", 20))
-
-    try:
-        df = data_fetcher.get_candles(symbol, timeframe=tf, limit=limit)
-        if df is None or df.empty or len(df) < 50:
-            return jsonify({"error": "Yetersiz veri — en az 50 mum gerekli"}), 400
-
-        close = df["close"]
-        high = df["high"]
-        low = df["low"]
-
-        # ── GÖSTERGE HESAPLAMA ──
-        # RSI
-        delta = close.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.ewm(alpha=1/14, min_periods=14).mean()
-        avg_loss = loss.ewm(alpha=1/14, min_periods=14).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-
-        # MACD
-        ema12 = close.ewm(span=12, adjust=False).mean()
-        ema26 = close.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        histogram = macd_line - signal_line
-
-        # Stochastic RSI
-        rsi_min = rsi.rolling(window=14).min()
-        rsi_max = rsi.rolling(window=14).max()
-        stoch = ((rsi - rsi_min) / (rsi_max - rsi_min).replace(0, np.nan)) * 100
-        stoch_k = stoch.rolling(window=3).mean()
-        stoch_d = stoch_k.rolling(window=3).mean()
-
-        # EMA'lar
-        ema8 = close.ewm(span=8, adjust=False).mean()
-        ema21 = close.ewm(span=21, adjust=False).mean()
-        ema50 = close.ewm(span=50, adjust=False).mean() if len(close) >= 50 else pd.Series([np.nan]*len(close), index=close.index)
-
-        # Bollinger Bands
-        bb_sma = close.rolling(window=20).mean()
-        bb_std = close.rolling(window=20).std()
-        bb_upper = bb_sma + (bb_std * 2)
-        bb_lower = bb_sma - (bb_std * 2)
-
-        # ADX
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-        tr1 = high - low
-        tr2 = (high - close.shift(1)).abs()
-        tr3 = (low - close.shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_series = tr.ewm(alpha=1/14, min_periods=14).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr_series.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.ewm(alpha=1/14, min_periods=14).mean() / atr_series.replace(0, np.nan))
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
-        adx = dx.ewm(alpha=1/14, min_periods=14).mean()
-
-        # Volume ratio
-        vol_sma = df["volume"].rolling(window=20).mean()
-        vol_ratio = df["volume"] / vol_sma.replace(0, np.nan)
-
-        # ── SINYAL TARAMA (OPTİMİZE v3) ──
-        # Prensipler: Az ama kaliteli giriş, trailing yok, geniş R:R
-        trades = []
-        in_trade = False
-        trade_entry = None
-
-        for i in range(50, len(df) - 1):
-            if in_trade:
-                # Basit SL/TP — trailing yok (kazançlıları kesmesin)
-                next_high = high.iloc[i]
-                next_low = low.iloc[i]
-
-                if trade_entry["direction"] == "LONG":
-                    if next_low <= trade_entry["sl"]:
-                        pnl = ((trade_entry["sl"] - trade_entry["price"]) / trade_entry["price"]) * 100
-                        trade_entry["exit"] = trade_entry["sl"]
-                        trade_entry["pnl"] = round(pnl, 3)
-                        trade_entry["result"] = "LOSS"
-                        trade_entry["exit_idx"] = i
-                        trades.append(trade_entry)
-                        in_trade = False
-                    elif next_high >= trade_entry["tp"]:
-                        pnl = ((trade_entry["tp"] - trade_entry["price"]) / trade_entry["price"]) * 100
-                        trade_entry["exit"] = trade_entry["tp"]
-                        trade_entry["pnl"] = round(pnl, 3)
-                        trade_entry["result"] = "WIN"
-                        trade_entry["exit_idx"] = i
-                        trades.append(trade_entry)
-                        in_trade = False
-
-                elif trade_entry["direction"] == "SHORT":
-                    if next_high >= trade_entry["sl"]:
-                        pnl = ((trade_entry["price"] - trade_entry["sl"]) / trade_entry["price"]) * 100
-                        trade_entry["exit"] = trade_entry["sl"]
-                        trade_entry["pnl"] = round(pnl, 3)
-                        trade_entry["result"] = "LOSS"
-                        trade_entry["exit_idx"] = i
-                        trades.append(trade_entry)
-                        in_trade = False
-                    elif next_low <= trade_entry["tp"]:
-                        pnl = ((trade_entry["price"] - trade_entry["tp"]) / trade_entry["price"]) * 100
-                        trade_entry["exit"] = trade_entry["tp"]
-                        trade_entry["pnl"] = round(pnl, 3)
-                        trade_entry["result"] = "WIN"
-                        trade_entry["exit_idx"] = i
-                        trades.append(trade_entry)
-                        in_trade = False
-                continue
-
-            # ── SKOR HESAPLAMA ──
-            cur_close = close.iloc[i]
-            cur_open = df["open"].iloc[i]
-            cur_rsi = rsi.iloc[i] if not np.isnan(rsi.iloc[i]) else 50
-            cur_stoch_k = stoch_k.iloc[i] if not np.isnan(stoch_k.iloc[i]) else 50
-            cur_stoch_d = stoch_d.iloc[i] if not np.isnan(stoch_d.iloc[i]) else 50
-            cur_macd = macd_line.iloc[i] if not np.isnan(macd_line.iloc[i]) else 0
-            cur_signal = signal_line.iloc[i] if not np.isnan(signal_line.iloc[i]) else 0
-            cur_hist = histogram.iloc[i] if not np.isnan(histogram.iloc[i]) else 0
-            prev_hist = histogram.iloc[i-1] if i > 0 and not np.isnan(histogram.iloc[i-1]) else 0
-            cur_ema8 = ema8.iloc[i]
-            cur_ema21 = ema21.iloc[i]
-            cur_ema50 = ema50.iloc[i] if not np.isnan(ema50.iloc[i]) else None
-            cur_adx = adx.iloc[i] if not np.isnan(adx.iloc[i]) else 0
-            cur_pdi = plus_di.iloc[i] if not np.isnan(plus_di.iloc[i]) else 0
-            cur_mdi = minus_di.iloc[i] if not np.isnan(minus_di.iloc[i]) else 0
-            cur_atr = atr_series.iloc[i] if not np.isnan(atr_series.iloc[i]) else 0
-            cur_vol_ratio = vol_ratio.iloc[i] if not np.isnan(vol_ratio.iloc[i]) else 1
-            cur_bb_upper = bb_upper.iloc[i] if not np.isnan(bb_upper.iloc[i]) else cur_close * 1.02
-            cur_bb_lower = bb_lower.iloc[i] if not np.isnan(bb_lower.iloc[i]) else cur_close * 0.98
-
-            bull_score = 0
-            bear_score = 0
-            bull_confirms = 0
-            bear_confirms = 0
-
-            # 1) Trend — EMA hizalama (20 puan, 1 onay)
-            if cur_ema8 > cur_ema21:
-                bull_confirms += 1
-                if cur_ema50 and cur_close > cur_ema50:
-                    bull_score += 20
-                else:
-                    bull_score += 8
-            else:
-                bear_confirms += 1
-                if cur_ema50 and cur_close < cur_ema50:
-                    bear_score += 20
-                else:
-                    bear_score += 8
-
-            # 2) ADX Yünü — +DI vs -DI (15 puan, 1 onay)
-            if cur_adx > 20:
-                adx_s = 15 * min(cur_adx / 50, 1.0)
-                if cur_pdi > cur_mdi:
-                    bull_score += adx_s
-                    bull_confirms += 1
-                else:
-                    bear_score += adx_s
-                    bear_confirms += 1
-
-            # 3) MACD (15 puan, 1 onay)
-            if cur_macd > cur_signal:
-                bull_confirms += 1
-                if cur_hist > prev_hist:
-                    bull_score += 15
-                else:
-                    bull_score += 5
-            else:
-                bear_confirms += 1
-                if cur_hist < prev_hist:
-                    bear_score += 15
-                else:
-                    bear_score += 5
-
-            # 4) RSI (10 puan, 1 onay)
-            if cur_rsi > 55:
-                bull_score += 10
-                bull_confirms += 1
-            elif cur_rsi < 45:
-                bear_score += 10
-                bear_confirms += 1
-
-            # 5) StochRSI (8 puan, 1 onay)
-            if cur_stoch_k > 50 and cur_stoch_k > cur_stoch_d:
-                bull_score += 8
-                bull_confirms += 1
-            elif cur_stoch_k < 50 and cur_stoch_k < cur_stoch_d:
-                bear_score += 8
-                bear_confirms += 1
-
-            # Volume (10 puan — onay sayılmaz, güç katkısı)
-            if cur_vol_ratio > 1.2:
-                if cur_ema8 > cur_ema21:
-                    bull_score += 10
-                else:
-                    bear_score += 10
-
-            # Bollinger (5 puan — onay sayılmaz, aşırı bölge katkısı)
-            if cur_close <= cur_bb_lower and cur_rsi < 35:
-                bull_score += 5
-            elif cur_close >= cur_bb_upper and cur_rsi > 65:
-                bear_score += 5
-
-            net_score = round(bull_score - bear_score, 1)
-
-            # ── KALİTE FİLTRELERİ ──
-            # 1. Minimum skor eşiği
-            if abs(net_score) < min_score:
-                continue
-
-            direction = "LONG" if net_score > 0 else "SHORT"
-            confirms = bull_confirms if direction == "LONG" else bear_confirms
-
-            # 2. En az 4/5 gösterge aynı yönde olmalı
-            if confirms < 4:
-                continue
-
-            # 3. EMA yayılma filtresi — EMA8 ve EMA21 çok yakınsa (piyasa kararsız)
-            ema_spread = abs(cur_ema8 - cur_ema21) / cur_close
-            if ema_spread < 0.0015:
-                continue
-
-            # 4. Mum yönü filtresi — sinyal yönünde kapanmış mum gerekli
-            candle_bullish = cur_close > cur_open
-            if direction == "LONG" and not candle_bullish:
-                continue
-            if direction == "SHORT" and candle_bullish:
-                continue
-
-            entry_price = close.iloc[i + 1]
-
-            # Sabit SL/TP: 1.5 ATR SL, 1:2.5 R:R
-            sl_distance = cur_atr * 1.5 if cur_atr > 0 else entry_price * 0.015
-            tp_distance = sl_distance * 2.5
-
-            if direction == "LONG":
-                sl = entry_price - sl_distance
-                tp = entry_price + tp_distance
-            else:
-                sl = entry_price + sl_distance
-                tp = entry_price - tp_distance
-
-            in_trade = True
-            trade_entry = {
-                "direction": direction,
-                "price": entry_price,
-                "sl": sl,
-                "tp": tp,
-                "score": net_score,
-                "entry_idx": i + 1,
-                "atr": cur_atr
-            }
-
-        # Açık kalan trade'i son fiyattan kapat
-        if in_trade and trade_entry:
-            last_price = close.iloc[-1]
-            if trade_entry["direction"] == "LONG":
-                pnl = ((last_price - trade_entry["price"]) / trade_entry["price"]) * 100
-            else:
-                pnl = ((trade_entry["price"] - last_price) / trade_entry["price"]) * 100
-            trade_entry["exit"] = last_price
-            trade_entry["pnl"] = round(pnl, 3)
-            trade_entry["result"] = "WIN" if pnl > 0 else "LOSS"
-            trade_entry["exit_idx"] = len(df) - 1
-            trades.append(trade_entry)
-
-        # ── SONUÇ HESAPLAMA ──
-        wins = sum(1 for t in trades if t["result"] == "WIN")
-        losses = sum(1 for t in trades if t["result"] == "LOSS")
-        total_trades = len(trades)
-        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
-        total_pnl = sum(t["pnl"] for t in trades)
-
-        win_pnls = [t["pnl"] for t in trades if t["result"] == "WIN"]
-        loss_pnls = [t["pnl"] for t in trades if t["result"] == "LOSS"]
-        avg_win = sum(win_pnls) / len(win_pnls) if win_pnls else 0
-        avg_loss = abs(sum(loss_pnls) / len(loss_pnls)) if loss_pnls else 1
-        avg_rr = avg_win / avg_loss if avg_loss > 0 else 0
-
-        best_trade = max((t["pnl"] for t in trades), default=0)
-        worst_trade = min((t["pnl"] for t in trades), default=0)
-
-        # Equity curve
-        equity_curve = [t["pnl"] for t in trades]
-
-        # Fiyat format
-        def fmt_bt(val):
-            if val >= 1:
-                return f"{val:.4f}"
-            elif val >= 0.001:
-                return f"{val:.6f}"
-            else:
-                return f"{val:.8f}"
-
-        # Trades listesi
-        trades_output = [{
-            "direction": t["direction"],
-            "entry_price": fmt_bt(t["price"]),
-            "exit_price": fmt_bt(t["exit"]),
-            "sl_price": fmt_bt(t["sl"]),
-            "tp_price": fmt_bt(t["tp"]),
-            "result": t["result"],
-            "pnl": t["pnl"],
-            "score": t["score"]
-        } for t in trades]
-
-        # Strateji analizi
-        analysis = []
-        if total_trades == 0:
-            analysis.append("ℹ Bu ayarlarla hiç sinyal üretilmedi. Min skor eşiğini düşürmeyi veya daha uzun periyot seçmeyi deneyin.")
-        else:
-            analysis.append(f"📊 Toplam {total_trades} işlem simüle edildi ({tf} zaman diliminde, {limit} mum)")
-
-            if win_rate >= 60:
-                analysis.append(f"✅ Kazanma oranı %{win_rate:.0f} — strateji bu coin için başarılı görünüyor")
-            elif win_rate >= 45:
-                analysis.append(f"⚠ Kazanma oranı %{win_rate:.0f} — ortalama performans, R:R oranı önemli")
-            else:
-                analysis.append(f"❌ Kazanma oranı %{win_rate:.0f} — strateji bu coin için zayıf")
-
-            if avg_rr >= 2:
-                analysis.append(f"✅ Ortalama R:R 1:{avg_rr:.1f} — iyi risk/ödül dengesı")
-            elif avg_rr >= 1:
-                analysis.append(f"⚠ Ortalama R:R 1:{avg_rr:.1f} — kabul edilebilir ama geliştirilebilir")
-            else:
-                analysis.append(f"❌ Ortalama R:R 1:{avg_rr:.1f} — kötü risk/ödül, SL/TP ayarı gözden geçirilmeli")
-
-            if total_pnl > 0:
-                analysis.append(f"💰 Toplam PnL: +%{total_pnl:.2f} — kârlı strateji")
-            else:
-                analysis.append(f"📉 Toplam PnL: %{total_pnl:.2f} — zararda, strateji bu markete uygun olmayabilir")
-
-            long_trades = [t for t in trades if t["direction"] == "LONG"]
-            short_trades = [t for t in trades if t["direction"] == "SHORT"]
-            long_wr = (sum(1 for t in long_trades if t["result"] == "WIN") / len(long_trades) * 100) if long_trades else 0
-            short_wr = (sum(1 for t in short_trades if t["result"] == "WIN") / len(short_trades) * 100) if short_trades else 0
-
-            if long_trades:
-                long_pnl = sum(t["pnl"] for t in long_trades)
-                analysis.append(f"📈 LONG: {len(long_trades)} işlem, %{long_wr:.0f} başarı, PnL: {'+' if long_pnl>=0 else ''}{long_pnl:.2f}%")
-            if short_trades:
-                short_pnl = sum(t["pnl"] for t in short_trades)
-                analysis.append(f"📉 SHORT: {len(short_trades)} işlem, %{short_wr:.0f} başarı, PnL: {'+' if short_pnl>=0 else ''}{short_pnl:.2f}%")
-
-            # Yüksek skorlu işlemlerin performansı
-            high_score_trades = [t for t in trades if abs(t["score"]) >= 30]
-            if high_score_trades:
-                hs_wr = sum(1 for t in high_score_trades if t["result"] == "WIN") / len(high_score_trades) * 100
-                hs_pnl = sum(t["pnl"] for t in high_score_trades)
-                analysis.append(f"🎯 Yüksek skorlu (30+) işlemler: {len(high_score_trades)} adet, %{hs_wr:.0f} başarı, PnL: {'+' if hs_pnl>=0 else ''}{hs_pnl:.2f}%")
-
-            # Max drawdown
-            cumulative = 0
-            peak = 0
-            max_dd = 0
-            for t in trades:
-                cumulative += t["pnl"]
-                if cumulative > peak:
-                    peak = cumulative
-                dd = peak - cumulative
-                if dd > max_dd:
-                    max_dd = dd
-            if max_dd > 0:
-                analysis.append(f"📊 Maksimum düşüş (drawdown): %{max_dd:.2f}")
-
-            # Ardışık kayıp
-            max_losing_streak = 0
-            current_streak = 0
-            for t in trades:
-                if t["result"] == "LOSS":
-                    current_streak += 1
-                    max_losing_streak = max(max_losing_streak, current_streak)
-                else:
-                    current_streak = 0
-            if max_losing_streak >= 3:
-                analysis.append(f"⚠ En uzun kayıp serisi: {max_losing_streak} ardışık kayıp — duygusal kontrol önemli")
-
-        return jsonify({
-            "symbol": symbol,
-            "timeframe": tf,
-            "candles": limit,
-            "min_score": min_score,
-            "total_trades": total_trades,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(win_rate, 1),
-            "total_pnl": round(total_pnl, 2),
-            "avg_rr": round(avg_rr, 1),
-            "best_trade": round(best_trade, 2),
-            "worst_trade": round(worst_trade, 2),
-            "equity_curve": equity_curve,
-            "trades": trades_output,
-            "analysis": analysis
-        })
-
-    except Exception as e:
-        logger.error(f"Backtest hatası ({symbol}): {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
 
 @app.route("/api/params")
 def api_params():
@@ -2444,6 +2015,25 @@ def api_regime():
     """Piyasa rejimi detayları — BTC trend, BTC.D, USDT flow, RS sıralaması"""
     summary = market_regime.get_regime_summary()
     return jsonify(summary)
+
+
+@app.route("/api/regime/refresh", methods=["POST"])
+def api_regime_refresh():
+    """Manuel rejim analizi tetikle (bot çalışmasa da)"""
+    try:
+        active_coins = data_fetcher.get_high_volume_coins()
+        if not active_coins:
+            return jsonify({"error": "Coin listesi alınamadı"}), 400
+        regime_result = market_regime.analyze_market(active_coins)
+        bot_state["current_regime"] = regime_result["regime"]
+        bot_state["btc_bias"] = regime_result["btc_bias"]
+        bot_state["long_candidates"] = len(regime_result["long_candidates"])
+        bot_state["short_candidates"] = len(regime_result["short_candidates"])
+        socketio.emit("regime_update", market_regime.get_regime_summary())
+        return jsonify(market_regime.get_regime_summary())
+    except Exception as e:
+        logger.error(f"Manuel rejim analizi hatası: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/regime/rankings")

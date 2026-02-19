@@ -259,6 +259,83 @@ class OKXDataFetcher:
             return book
         return None
 
+    # =================== PİYASA VERİLERİ (Funding, OI, LS Ratio) ===================
+
+    def get_funding_rate(self, symbol):
+        """Fonlama oranını çek (SWAP perpetual)"""
+        cache_key = f"funding_{symbol}"
+        cached = self._get_cached(cache_key, ttl=30)
+        if cached is not None:
+            return cached
+
+        # Güncel fonlama oranı
+        params = {"instId": symbol}
+        data = self._make_request("/public/funding-rate", params)
+
+        result = {"current": 0, "next": 0, "next_time": None}
+        if data:
+            fr_str = data[0].get("fundingRate", "0") or "0"
+            nfr_str = data[0].get("nextFundingRate", "0") or "0"
+            result["current"] = float(fr_str) * 100  # % olarak
+            result["next"] = float(nfr_str) * 100
+            next_ts = data[0].get("nextFundingTime")
+            if next_ts:
+                result["next_time"] = datetime.fromtimestamp(int(next_ts) / 1000).strftime("%H:%M")
+
+        self._set_cache(cache_key, result, ttl=30)
+        return result
+
+    def get_open_interest(self, symbol):
+        """Açık faiz verisi (SWAP)"""
+        cache_key = f"oi_{symbol}"
+        cached = self._get_cached(cache_key, ttl=30)
+        if cached is not None:
+            return cached
+
+        params = {"instId": symbol}
+        data = self._make_request("/public/open-interest", params)
+
+        result = {"oi": 0, "oi_usdt": 0}
+        if data:
+            oi_val = float(data[0].get("oi", 0) or 0)
+            oi_usd = float(data[0].get("oiUsd", 0) or 0)
+            result["oi"] = oi_val
+            result["oi_usdt"] = oi_usd
+
+        self._set_cache(cache_key, result, ttl=30)
+        return result
+
+    def get_long_short_ratio(self, symbol):
+        """Long/Short oranı (5m, 1H, 24H)"""
+        cache_key = f"lsr_{symbol}"
+        cached = self._get_cached(cache_key, ttl=60)
+        if cached is not None:
+            return cached
+
+        # OKX instId -> ccy (BTC-USDT-SWAP -> BTC)
+        ccy = symbol.split("-")[0]
+        result = {}
+        for period in ["5m", "1H", "1D"]:
+            params = {"ccy": ccy, "period": period}
+            data = self._make_request("/rubik/stat/contracts/long-short-account-ratio", params)
+            if data and len(data) > 0:
+                latest = data[0]
+                # API döndürür: [[timestamp, ratio], ...] veya [{"ts":..., "longShortRatio":...}, ...]
+                if isinstance(latest, list) and len(latest) >= 2:
+                    lsr_val = latest[1]
+                elif isinstance(latest, dict):
+                    lsr_val = latest.get("longShortRatio", "")
+                else:
+                    lsr_val = None
+                result[period] = round(float(lsr_val), 4) if lsr_val else None
+            else:
+                result[period] = None
+
+            time.sleep(0.1)
+
+        self._set_cache(cache_key, result, ttl=60)
+        return result
+
     # =================== CACHE ===================
 
     def _get_cached(self, key, ttl=None):

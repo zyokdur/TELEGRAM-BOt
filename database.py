@@ -761,7 +761,13 @@ def get_loss_analysis(limit=30):
     all_possible = [
         "MARKET_STRUCTURE", "ORDER_BLOCK", "FVG", "DISPLACEMENT",
         "LIQUIDITY_SWEEP", "OTE", "HTF_CONFIRMATION", "KILLZONE_ACTIVE",
-        "DISCOUNT_ZONE", "PREMIUM_ZONE", "BREAKER_BLOCK"
+        "DISCOUNT_ZONE", "PREMIUM_ZONE", "BREAKER_BLOCK",
+        # Ek bileşenler (eksik olan 11 bileşen eklendi)
+        "MTF_CONFIRMATION", "MTF_OB_CONFLUENCE", "MTF_FVG_CONFLUENCE",
+        "HIGH_QUALITY_SWEEP", "SWEEP_MSS_A_PLUS",
+        "HIGH_VOLUME_DISPLACEMENT", "ABOVE_AVG_VOLUME",
+        "CRYPTO_ACTIVE_SESSION", "TRIPLE_TF_ALIGNMENT",
+        "CORE_GATE_MULTIPLIER", "HTF_SWEEP_DISP_MULTIPLIER"
     ]
     total_pnl = 0
 

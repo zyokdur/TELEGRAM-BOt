@@ -65,10 +65,6 @@
                 <i class="fas fa-brain"></i>
                 <span class="nav-label">Optimizasyon</span>
             </button>
-            <button class="nav-item" data-tab="backtest" onclick="switchTab('backtest')">
-                <i class="fas fa-flask"></i>
-                <span class="nav-label">Backtest</span>
-            </button>
             <button class="nav-item" data-tab="forex" onclick="switchTab('forex')">
                 <i class="fas fa-chart-line"></i>
                 <span class="nav-label">Forex & Altın</span>
@@ -257,13 +253,16 @@
                 <div class="search-bar">
                     <i class="fas fa-magnifying-glass"></i>
                     <input type="text" id="coinSearchInput" placeholder="Coin ara... (BTC, ETH, SOL)" oninput="filterCoins()">
-                    <div class="search-tag">
-                        <i class="fas fa-filter"></i> Min: <strong>$5M</strong>
+                    <div class="coin-tf-filters">
+                        <button class="coin-tf-btn active" data-filter="all" onclick="filterCoinsByTf('all')">Tümü</button>
+                        <button class="coin-tf-btn" data-filter="15m" onclick="filterCoinsByTf('15m')">15D</button>
+                        <button class="coin-tf-btn" data-filter="1H" onclick="filterCoinsByTf('1H')">1S</button>
+                        <button class="coin-tf-btn" data-filter="4H" onclick="filterCoinsByTf('4H')">4S</button>
                     </div>
                 </div>
-                <div class="card">
+                <div class="card coins-card">
                     <div class="table-wrapper">
-                        <table class="data-table">
+                        <table class="data-table coins-table">
                             <thead>
                                 <tr>
                                     <th>#</th>
@@ -349,9 +348,14 @@
                         <h2>Piyasa Rejimi & Rölatif Güç</h2>
                         <span class="content-subtitle">BTC Trend, BTC.D Proxy, Para Akışı Analizi</span>
                     </div>
-                    <button class="btn-icon" onclick="loadRegime()" title="Yenile">
-                        <i class="fas fa-arrows-rotate"></i>
-                    </button>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <button class="btn-icon" onclick="refreshRegimeManual()" title="Rejim Analizi Yap (OKX'ten çeker)">
+                            <i class="fas fa-satellite-dish"></i>
+                        </button>
+                        <button class="btn-icon" onclick="loadRegime()" title="Cache'den Yenile">
+                            <i class="fas fa-arrows-rotate"></i>
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Rejim Kartları -->
@@ -578,201 +582,36 @@
                 </div>
             </div>
 
-            <!-- BACKTEST SEKMESİ -->
-            <div class="tab-content" id="tab-backtest">
-                <div class="content-header">
-                    <div class="content-header-left">
-                        <i class="fas fa-flask"></i>
-                        <span>Strateji Backtest</span>
-                    </div>
-                </div>
-
-                <!-- Backtest Ayarları -->
-                <div class="card backtest-config-card">
-                    <div class="card-header">
-                        <i class="fas fa-sliders"></i>
-                        <span>Backtest Ayarları</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="bt-form">
-                            <div class="bt-form-group">
-                                <label>Coin Seçimi</label>
-                                <select id="btSymbol" class="bt-select">
-                                    <option value="">Coin seçin...</option>
-                                </select>
-                            </div>
-                            <div class="bt-form-group">
-                                <label>Zaman Dilimi</label>
-                                <select id="btTimeframe" class="bt-select">
-                                    <option value="15m">15 Dakika</option>
-                                    <option value="1H" selected>1 Saat</option>
-                                    <option value="4H">4 Saat</option>
-                                </select>
-                            </div>
-                            <div class="bt-form-group">
-                                <label>Mum Sayısı</label>
-                                <select id="btPeriod" class="bt-select">
-                                    <option value="100">100 Mum</option>
-                                    <option value="200">200 Mum</option>
-                                    <option value="300" selected>300 Mum (Maks)</option>
-                                </select>
-                            </div>
-                            <div class="bt-form-group">
-                                <label>Min Sinyal Skoru</label>
-                                <select id="btMinScore" class="bt-select">
-                                    <option value="10">10+ (Agresif)</option>
-                                    <option value="20" selected>20+ (Normal)</option>
-                                    <option value="30">30+ (Güvenli)</option>
-                                    <option value="40">40+ (Çok Güvenli)</option>
-                                </select>
-                            </div>
-                            <button class="btn-primary bt-run-btn" id="btRunBtn" onclick="runBacktest()">
-                                <i class="fas fa-play"></i> Backtest Başlat
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Backtest Loading -->
-                <div class="bt-loading" id="btLoading" style="display:none">
-                    <div class="spinner"></div>
-                    <span>Backtest çalıştırılıyor... Bu birkaç saniye sürebilir.</span>
-                </div>
-
-                <!-- Backtest Sonuçları -->
-                <div id="btResults" style="display:none">
-                    <!-- Summary Cards -->
-                    <div class="bt-summary-grid">
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon win"><i class="fas fa-trophy"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btWinRate">--%</span>
-                                <span class="bt-sum-label">Kazanma Oranı</span>
-                            </div>
-                        </div>
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon trades"><i class="fas fa-exchange-alt"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btTotalTrades">--</span>
-                                <span class="bt-sum-label">Toplam İşlem</span>
-                            </div>
-                        </div>
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon pnl"><i class="fas fa-chart-line"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btTotalPnl">--</span>
-                                <span class="bt-sum-label">Toplam PnL</span>
-                            </div>
-                        </div>
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon rr"><i class="fas fa-balance-scale"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btAvgRR">--</span>
-                                <span class="bt-sum-label">Ort. R:R</span>
-                            </div>
-                        </div>
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon best"><i class="fas fa-arrow-up"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btBestTrade">--</span>
-                                <span class="bt-sum-label">En İyi</span>
-                            </div>
-                        </div>
-                        <div class="bt-summary-card">
-                            <div class="bt-sum-icon worst"><i class="fas fa-arrow-down"></i></div>
-                            <div class="bt-sum-body">
-                                <span class="bt-sum-value" id="btWorstTrade">--</span>
-                                <span class="bt-sum-label">En Kötü</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Win/Loss Bar -->
-                    <div class="bt-winloss-bar">
-                        <div class="bt-wl-bar">
-                            <div class="bt-wl-fill-win" id="btWinFill"></div>
-                            <div class="bt-wl-fill-loss" id="btLossFill"></div>
-                        </div>
-                        <div class="bt-wl-labels">
-                            <span class="bt-wl-win" id="btWinCount">0 Kazanç</span>
-                            <span class="bt-wl-loss" id="btLossCount">0 Kayıp</span>
-                        </div>
-                    </div>
-
-                    <!-- PnL Equity Curve (text-based) -->
-                    <div class="card bt-equity-card">
-                        <div class="card-header">
-                            <i class="fas fa-chart-area"></i>
-                            <span>PnL Eğrisi</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="bt-equity-bars" id="btEquityBars"></div>
-                        </div>
-                    </div>
-
-                    <!-- İşlem Listesi -->
-                    <div class="card bt-trades-card">
-                        <div class="card-header">
-                            <i class="fas fa-list-ol"></i>
-                            <span>İşlem Detayları</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="bt-trades-table-wrap">
-                                <table class="bt-trades-table" id="btTradesTable">
-                                    <thead>
-                                        <tr>
-                                            <th>#</th>
-                                            <th>Yön</th>
-                                            <th>Giriş</th>
-                                            <th>Çıkış</th>
-                                            <th>SL</th>
-                                            <th>TP</th>
-                                            <th>Sonuç</th>
-                                            <th>PnL</th>
-                                            <th>Skor</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="btTradesBody"></tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Strateji Analizi -->
-                    <div class="card bt-analysis-card">
-                        <div class="card-header">
-                            <i class="fas fa-microscope"></i>
-                            <span>Strateji Analizi</span>
-                        </div>
-                        <div class="card-body">
-                            <div id="btAnalysis" class="bt-analysis-content"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <!-- ═══════════════════════════════════════════ -->
             <!-- FOREX & ALTIN ICT SEKMESİ                  -->
             <!-- ═══════════════════════════════════════════ -->
             <div class="tab-content" id="tab-forex">
 
-                <!-- Kill Zone Banner -->
-                <div class="fx-kill-zone-bar" id="fxKillZoneBar">
-                    <div class="kz-icon"><i class="fas fa-crosshairs"></i></div>
-                    <div class="kz-info">
-                        <span class="kz-label" id="kzLabel">Kill Zone Durumu</span>
-                        <span class="kz-desc" id="kzDesc">Yükleniyor...</span>
+                <!-- Kill Zone + Silver Bullet + Session Bar -->
+                <div class="fx-session-bar" id="fxSessionBar">
+                    <div class="fx-session-left">
+                        <div class="fx-session-icon" id="fxSessionIcon"><i class="fas fa-crosshairs"></i></div>
+                        <div class="fx-session-info">
+                            <span class="fx-session-label" id="kzLabel">Kill Zone Durumu</span>
+                            <span class="fx-session-desc" id="kzDesc">Yükleniyor...</span>
+                        </div>
                     </div>
-                    <div class="kz-zones" id="kzZones"></div>
+                    <div class="fx-session-pills" id="kzZones"></div>
+                    <div class="fx-session-right">
+                        <div class="fx-auto-badge" id="fxAutoBadge">
+                            <i class="fas fa-satellite-dish"></i>
+                            <span id="fxAutoCountdown">--</span>
+                        </div>
+                    </div>
                 </div>
 
-                <!-- Üst Kontrol Barı -->
-                <div class="fx-controls">
+                <!-- Zaman Dilimi Selector -->
+                <div class="fx-tf-bar">
                     <div class="fx-tf-selector">
-                        <button class="fx-tf-btn active" data-fxtf="15m" onclick="switchForexTf('15m')">
+                        <button class="fx-tf-btn" data-fxtf="15m" onclick="switchForexTf('15m')">
                             <i class="fas fa-bolt"></i> 15dk
                         </button>
-                        <button class="fx-tf-btn" data-fxtf="1h" onclick="switchForexTf('1h')">
+                        <button class="fx-tf-btn active" data-fxtf="1h" onclick="switchForexTf('1h')">
                             <i class="fas fa-clock"></i> 1 Saat
                         </button>
                         <button class="fx-tf-btn" data-fxtf="4h" onclick="switchForexTf('4h')">
@@ -782,31 +621,27 @@
                             <i class="fas fa-calendar"></i> Günlük
                         </button>
                     </div>
-                    <button class="btn-icon fx-scan-btn" onclick="scanForex()" title="Tara" id="fxScanBtn">
-                        <i class="fas fa-satellite-dish"></i>
-                        <span>ICT Tara</span>
-                    </button>
-                </div>
-
-                <!-- Loading -->
-                <div class="fx-loading" id="fxLoading" style="display:none">
-                    <div class="spinner"></div>
-                    <span>ICT analizi yapılıyor... Order Block, FVG, Market Structure taranıyor</span>
-                </div>
-
-                <!-- Sinyal Kartları Grid -->
-                <div class="fx-signals-grid" id="fxSignalsGrid">
-                    <div class="fx-empty-state" id="fxEmptyState">
-                        <i class="fas fa-chart-line"></i>
-                        <h3>Forex & Emtia ICT Sinyalleri</h3>
-                        <p>EUR/USD, GBP/USD, USD/JPY, Altın ve Gümüş için ICT metodolojisi ile analiz yapın.</p>
-                        <button class="btn-primary" onclick="scanForex()">
-                            <i class="fas fa-satellite-dish"></i> Taramayı Başlat
-                        </button>
+                    <div class="fx-last-update" id="fxLastUpdate">
+                        <i class="fas fa-sync-alt fa-spin" style="opacity:0.4"></i>
+                        <span>İlk tarama bekleniyor...</span>
                     </div>
                 </div>
 
-                <!-- Detay Modal (aynı sayfada açılır) -->
+                <!-- Loading -->
+                <div class="fx-loading" id="fxLoading">
+                    <div class="fx-loading-inner">
+                        <div class="fx-loading-spinner"></div>
+                        <div class="fx-loading-text">
+                            <span class="fx-loading-title">ICT Analizi Yapılıyor</span>
+                            <span class="fx-loading-sub">Market Structure • Order Block • FVG • Liquidity Sweep</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sinyal Kartları Grid -->
+                <div class="fx-signals-grid" id="fxSignalsGrid" style="display:none"></div>
+
+                <!-- Detay Panel -->
                 <div class="fx-detail-panel" id="fxDetailPanel" style="display:none">
                     <div class="fx-detail-header">
                         <button class="btn-back" onclick="closeFxDetail()" title="Geri">
@@ -853,7 +688,7 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-sitemap"></i>
-                            <span>Market Structure</span>
+                            <span>Market Structure (BOS / CHoCH)</span>
                         </div>
                         <div class="fx-ms-card" id="fxMsCard"></div>
                     </div>
@@ -862,7 +697,7 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-cubes"></i>
-                            <span>Order Blocks</span>
+                            <span>Order Blocks (OB)</span>
                         </div>
                         <div class="fx-ob-list" id="fxObList"></div>
                     </div>
@@ -880,7 +715,7 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-layer-group"></i>
-                            <span>Fair Value Gaps (FVG)</span>
+                            <span>Fair Value Gaps (FVG) & CE</span>
                         </div>
                         <div class="fx-ms-card" id="fxFvgCard"></div>
                     </div>
@@ -889,16 +724,16 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-bolt-lightning"></i>
-                            <span>Displacement & Likidite</span>
+                            <span>Displacement & Liquidity Sweep</span>
                         </div>
                         <div class="fx-ms-card" id="fxDispLiqCard"></div>
                     </div>
 
-                    <!-- Daily Bias & AMD -->
+                    <!-- Daily Bias & AMD & Judas -->
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-compass"></i>
-                            <span>Daily Bias & AMD</span>
+                            <span>Daily Bias / Power of 3 (AMD) / Judas Swing</span>
                         </div>
                         <div class="fx-ms-card" id="fxBiasAmdCard"></div>
                     </div>
@@ -907,7 +742,7 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-percentage"></i>
-                            <span>Premium / Discount & OTE</span>
+                            <span>Premium / Discount & OTE (Fib 0.618-0.786)</span>
                         </div>
                         <div class="fx-pd-card" id="fxPdCard"></div>
                     </div>
@@ -916,7 +751,7 @@
                     <div class="fx-section">
                         <div class="fx-section-head">
                             <i class="fas fa-list-check"></i>
-                            <span>Sinyal Gerekçeleri</span>
+                            <span>ICT Confluence Gerekçeleri</span>
                         </div>
                         <div class="fx-reasons" id="fxReasons"></div>
                     </div>
@@ -978,6 +813,11 @@
                                 <div class="score-labels"><span>AYI</span><span>NÖTR</span><span>BOĞA</span></div>
                                 <div class="score-track"><div class="score-fill-bear" id="scoreFillBear"></div><div class="score-fill-bull" id="scoreFillBull"></div><div class="score-pointer" id="scorePointer"></div></div>
                             </div>
+                            <div class="verdict-meta" id="verdictMeta" style="display:none">
+                                <span class="meta-chip" id="metaRegime" title="4H Piyasa Rejimi"></span>
+                                <span class="meta-chip" id="metaMomentum" title="Cross-TF Momentum İvmesi"></span>
+                                <span class="meta-chip" id="metaConfluence" title="TF Uyumu"></span>
+                            </div>
                             <div class="verdict-warnings" id="verdictWarnings"></div>
                         </div>
                     </div>
@@ -1030,27 +870,93 @@
 
                     <div class="detail-tf-content" id="modalTfContent">
                         <div class="tf-verdict-row" id="tfVerdictRow"></div>
-                        <div class="ind-score-summary" id="indScoreSummary"></div>
+                        <div class="pillar-score-summary" id="pillarScoreSummary"></div>
 
-                        <!-- Indicators Grid -->
+                        <!-- ═══ ANA STRATEJİ GÖSTERGELERİ ═══ -->
+                        <div class="strategy-section-title"><i class="fas fa-bullseye"></i> Ana Strateji Göstergeleri</div>
                         <div class="indicators-grid">
-                            <!-- Trend / EMA — Full width first -->
-                            <div class="indicator-card wide" id="indTrend">
+                            <!-- Donchian Channel — Full width -->
+                            <div class="indicator-card wide main-strategy" id="indDonchian">
                                 <div class="ind-header">
-                                    <span class="ind-icon trend"><i class="fas fa-arrow-trend-up"></i></span>
-                                    <span class="ind-title">Trend & EMA Yapısı</span>
-                                    <span class="ind-badge" id="trendBadge">--</span>
+                                    <span class="ind-icon donchian"><i class="fas fa-arrows-alt-v"></i></span>
+                                    <span class="ind-title">Donchian Kanalı (Kırılım & Yön)</span>
+                                    <span class="ind-badge" id="donchianBadge">--</span>
                                 </div>
-                                <div class="ema-values">
-                                    <div class="ema-item"><span class="ema-label">EMA 8</span><span class="ema-val" id="ema8Val">--</span></div>
-                                    <div class="ema-item"><span class="ema-label">EMA 21</span><span class="ema-val" id="ema21Val">--</span></div>
-                                    <div class="ema-item"><span class="ema-label">EMA 50</span><span class="ema-val" id="ema50Val">--</span></div>
-                                    <div class="ema-item"><span class="ema-label">EMA 200</span><span class="ema-val" id="ema200Val">--</span></div>
+                                <div class="donchian-values">
+                                    <div class="dc-val-item"><span class="dc-label">Üst Bant</span><span class="dc-num" id="dcUpper">--</span></div>
+                                    <div class="dc-val-item"><span class="dc-label">Orta</span><span class="dc-num" id="dcMiddle">--</span></div>
+                                    <div class="dc-val-item"><span class="dc-label">Alt Bant</span><span class="dc-num" id="dcLower">--</span></div>
+                                    <div class="dc-val-item"><span class="dc-label">Genişlik</span><span class="dc-num" id="dcWidth">--</span></div>
                                 </div>
-                                <span class="ema-order-badge" id="emaOrderBadge"></span>
-                                <p class="ind-desc" id="trendDesc"></p>
+                                <div class="dc-position-meter">
+                                    <div class="dc-position-dot" id="dcPositionDot"></div>
+                                </div>
+                                <p class="ind-desc" id="donchianDesc"></p>
                             </div>
 
+                            <!-- VWAP + DPO — Full width -->
+                            <div class="indicator-card wide main-strategy" id="indVwapDpo">
+                                <div class="ind-header">
+                                    <span class="ind-icon vwap"><i class="fas fa-balance-scale"></i></span>
+                                    <span class="ind-title">VWAP + DPO (Fiyat Makul mü?)</span>
+                                    <span class="ind-badge" id="vwapDpoBadge">--</span>
+                                </div>
+                                <div class="vwap-dpo-values">
+                                    <div class="vd-val-item"><span class="vd-label">VWAP</span><span class="vd-num" id="vwapValue">--</span></div>
+                                    <div class="vd-val-item"><span class="vd-label">Sapma (σ)</span><span class="vd-num" id="vwapDeviation">--</span></div>
+                                    <div class="vd-val-item"><span class="vd-label">DPO</span><span class="vd-num" id="dpoValue">--</span></div>
+                                </div>
+                                <p class="ind-desc" id="vwapDpoDesc"></p>
+                            </div>
+
+                            <!-- CMF -->
+                            <div class="indicator-card main-strategy" id="indCmf">
+                                <div class="ind-header">
+                                    <span class="ind-icon cmf"><i class="fas fa-money-bill-wave"></i></span>
+                                    <span class="ind-title">CMF (Chaikin Para Akışı)</span>
+                                    <span class="ind-badge" id="cmfBadge">--</span>
+                                </div>
+                                <div class="cmf-value-row">
+                                    <span class="ind-big-value" id="cmfValue">--</span>
+                                    <div class="cmf-bar">
+                                        <div class="cmf-bar-fill" id="cmfBarFill"></div>
+                                        <div class="cmf-bar-center"></div>
+                                    </div>
+                                </div>
+                                <p class="ind-desc" id="cmfDesc"></p>
+                            </div>
+
+                            <!-- MFI -->
+                            <div class="indicator-card main-strategy" id="indMfi">
+                                <div class="ind-header">
+                                    <span class="ind-icon mfi"><i class="fas fa-hand-holding-usd"></i></span>
+                                    <span class="ind-title">MFI (Para Akış Endeksi)</span>
+                                    <span class="ind-badge" id="mfiBadge">--</span>
+                                </div>
+                                <div class="ind-value-row">
+                                    <span class="ind-big-value" id="mfiValue">--</span>
+                                    <div class="rsi-gauge">
+                                        <div class="rsi-gauge-track">
+                                            <div class="rsi-zone rsi-oversold"></div>
+                                            <div class="rsi-zone rsi-neutral"></div>
+                                            <div class="rsi-zone rsi-overbought"></div>
+                                            <div class="rsi-needle" id="mfiNeedle"></div>
+                                        </div>
+                                        <div class="rsi-labels">
+                                            <span>0</span><span>20</span><span>50</span><span>80</span><span>100</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <p class="ind-desc" id="mfiDesc"></p>
+                            </div>
+                        </div>
+
+                        <!-- ═══ DESTEK GÖSTERGELERİ ═══ -->
+                        <div class="strategy-section-title support-section" onclick="document.getElementById('supportIndicators').classList.toggle('collapsed')">
+                            <i class="fas fa-info-circle"></i> Destek Göstergeler
+                            <span class="collapse-arrow" id="supportCollapseArrow"><i class="fas fa-chevron-down"></i></span>
+                        </div>
+                        <div class="indicators-grid" id="supportIndicators">
                             <!-- RSI -->
                             <div class="indicator-card" id="indRsi">
                                 <div class="ind-header">
@@ -1231,46 +1137,56 @@
                     </div>
                 </div>
 
-                <!-- ═══════════ 5. AI TRADİNG SENARYOSU ═══════════ -->
-                <div class="cd-section" id="scenarioSection" style="display:none">
-                    <div class="cd-section-head scenario-head">
-                        <i class="fas fa-brain"></i>
-                        <span>AI Trading Senaryosu</span>
-                        <span class="scenario-badge" id="scenarioBadge">--</span>
+                <!-- ═══════════ 5. PİYASA VERİLERİ ═══════════ -->
+                <div class="cd-section" id="marketDataSection" style="display:none">
+                    <div class="cd-section-head">
+                        <i class="fas fa-chart-pie"></i>
+                        <span>Piyasa Verileri</span>
                     </div>
-                    <div class="scenario-container" id="scenarioContainer">
-                        <!-- Genel Strateji -->
-                        <div class="scenario-strategy" id="scenarioStrategy"></div>
-
-                        <!-- Bekleme Koşulları -->
-                        <div class="scenario-wait" id="scenarioWait"></div>
-
-                        <!-- Anahtar Seviyeler -->
-                        <div class="scenario-levels" id="scenarioLevels"></div>
-
-                        <!-- Long / Short Senaryoları yan yana -->
-                        <div class="scenario-grid">
-                            <div class="scenario-card long" id="scenarioLong">
-                                <div class="scenario-card-header long">
-                                    <i class="fas fa-arrow-trend-up"></i>
-                                    <span>LONG Senaryosu</span>
-                                    <span class="scenario-quality" id="longQuality">0%</span>
-                                </div>
-                                <div class="scenario-card-body" id="longBody"></div>
+                    <div class="market-data-grid">
+                        <!-- Fonlama Oranı -->
+                        <div class="md-card" id="mdFunding">
+                            <div class="md-card-header">
+                                <span class="md-icon funding"><i class="fas fa-percentage"></i></span>
+                                <span class="md-title">Fonlama Oranı</span>
+                                <span class="ind-badge" id="fundingBadge">--</span>
                             </div>
-                            <div class="scenario-card short" id="scenarioShort">
-                                <div class="scenario-card-header short">
-                                    <i class="fas fa-arrow-trend-down"></i>
-                                    <span>SHORT Senaryosu</span>
-                                    <span class="scenario-quality" id="shortQuality">0%</span>
+                            <div class="md-body">
+                                <div class="md-values">
+                                    <div class="md-val-item"><span class="md-label">Mevcut</span><span class="md-num" id="fundingCurrent">--</span></div>
+                                    <div class="md-val-item"><span class="md-label">Sonraki</span><span class="md-num" id="fundingNext">--</span></div>
+                                    <div class="md-val-item"><span class="md-label">Zaman</span><span class="md-num" id="fundingTime">--</span></div>
                                 </div>
-                                <div class="scenario-card-body" id="shortBody"></div>
+                                <p class="ind-desc" id="fundingDesc"></p>
                             </div>
                         </div>
 
-                        <div class="scenario-disclaimer">
-                            <i class="fas fa-exclamation-triangle"></i>
-                            Bu senaryolar teknik analiz verilerine dayalı otomatik üretilmiştir. Yatırım tavsiyesi değildir.
+                        <!-- Açık Faiz -->
+                        <div class="md-card" id="mdOI">
+                            <div class="md-card-header">
+                                <span class="md-icon oi"><i class="fas fa-chart-line"></i></span>
+                                <span class="md-title">Açık Faiz (Open Interest)</span>
+                                <span class="ind-badge" id="oiBadge">--</span>
+                            </div>
+                            <div class="md-body">
+                                <div class="md-values">
+                                    <div class="md-val-item"><span class="md-label">Toplam OI</span><span class="md-num" id="oiValue">--</span></div>
+                                </div>
+                                <p class="ind-desc" id="oiDesc"></p>
+                            </div>
+                        </div>
+
+                        <!-- Long/Short Ratio -->
+                        <div class="md-card wide" id="mdLSR">
+                            <div class="md-card-header">
+                                <span class="md-icon lsr"><i class="fas fa-scale-balanced"></i></span>
+                                <span class="md-title">Long / Short Oranı</span>
+                            </div>
+                            <div class="md-body">
+                                <div class="lsr-periods" id="lsrPeriods">
+                                    <div class="lsr-no-data">Veri bekleniyor...</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

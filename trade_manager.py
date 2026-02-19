@@ -151,18 +151,19 @@ class TradeManager:
             position_note = " | A-TIER: %75 pozisyon (MSS yok)"
         # A+ = tam pozisyon (varsayılan)
 
+        components = signal.get("components", [])
         entry_reasons = (
             f"Tier: {quality_tier} | "
             f"Mode: {entry_mode} | "
             f"RR: {signal.get('rr_ratio', '?')} | "
-            f"Score: {signal['confluence_score']} | "
-            f"Conf: {signal['confidence']}% | "
+            f"Score: {signal.get('confluence_score', 0)} | "
+            f"Conf: {signal.get('confidence', 0)}% | "
             f"HTF: {signal.get('htf_bias', '?')} | "
             f"Session: {signal.get('session', '')} | "
             f"Entry: {signal.get('entry_type', '?')} | "
             f"SL: {signal.get('sl_type', '?')} | "
             f"TP: {signal.get('tp_type', '?')} | "
-            f"Bileşenler: {', '.join(signal['components'])} | "
+            f"Bileşenler: {', '.join(components)} | "
             f"Cezalar: {', '.join(signal.get('penalties', []))}"
             f"{position_note}"
         )
@@ -173,9 +174,9 @@ class TradeManager:
             entry_price=signal["entry"],
             stop_loss=signal["sl"],
             take_profit=signal["tp"],
-            confidence=signal["confidence"],
-            confluence_score=signal["confluence_score"],
-            components=signal["components"],
+            confidence=signal.get("confidence", 0),
+            confluence_score=signal.get("confluence_score", 0),
+            components=components,
             timeframe="15m",
             status=initial_status,
             notes=entry_reasons,

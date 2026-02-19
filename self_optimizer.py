@@ -102,7 +102,9 @@ class SelfOptimizer:
             changes.append(patience_change)
 
         # 6. Kayıp analizi → derin öğrenme (neden kaybettik?)
-        loss_changes = self._learn_from_losses()
+        # Adım 1-5'te zaten değişen parametreleri topla → çift ayarlamayı önle
+        already_changed = {c["param"] for c in changes}
+        loss_changes = self._learn_from_losses(already_changed)
         changes.extend(loss_changes)
 
         # 7-8. Bilgilendirme analizleri (parametre değiştirmez, log tutar)
@@ -184,6 +186,7 @@ class SelfOptimizer:
             return changes
 
         # ICT bileşen → parametre eşleştirmesi + güvenli aralıklar
+        # Her bileşenin performansına göre ilgili parametresi ayarlanır
         param_mapping = {
             "ORDER_BLOCK": {
                 "param": "ob_body_ratio_min",
@@ -200,7 +203,20 @@ class SelfOptimizer:
             "DISPLACEMENT": {
                 "param": "displacement_min_body_ratio",
                 "min_val": 0.5, "max_val": 0.85
-            }
+            },
+            # Ek bileşen eşleştirmeleri (BUG 4 düzeltmesi)
+            "MARKET_STRUCTURE": {
+                "param": "swing_lookback",
+                "min_val": 3, "max_val": 10
+            },
+            "BREAKER_BLOCK": {
+                "param": "ob_max_age_candles",
+                "min_val": 15, "max_val": 50
+            },
+            "HIGH_VOLUME_DISPLACEMENT": {
+                "param": "displacement_min_size_pct",
+                "min_val": 0.002, "max_val": 0.008
+            },
         }
 
         for comp_name, cfg in param_mapping.items():
@@ -505,11 +521,18 @@ class SelfOptimizer:
             )
 
 
-    def _learn_from_losses(self):
+    def _learn_from_losses(self, already_changed=None):
         """
         Kayıp analizi yaparak otomatik ders çıkar.
         Neden kaybettik? Hangi bileşen eksikti? Hangi bileşen yanılttı?
+        
+        Args:
+            already_changed: Aynı döngüde daha önce değiştirilen param isimleri seti.
+                           Çift ayarlamayı önlemek için bu parametreler atlanır.
         """
+        if already_changed is None:
+            already_changed = set()
+
         changes = []
         loss_info = get_loss_analysis(30)
 
@@ -519,7 +542,8 @@ class SelfOptimizer:
         stats = get_performance_summary()
 
         # 1. Düşük güvenle girilen kayıplar çoğunluksa → min_confidence artır
-        if loss_info["total_losses"] > 0:
+        #    (Adım 1'de zaten ayarlandıysa atla — çift ayarlama koruması)
+        if "min_confidence" not in already_changed and loss_info["total_losses"] > 0:
             low_conf_ratio = loss_info["low_confidence_losses"] / loss_info["total_losses"]
             if low_conf_ratio > 0.4:
                 current = get_bot_param("min_confidence", ICT_PARAMS["min_confidence"])
@@ -535,28 +559,34 @@ class SelfOptimizer:
                     changes.append({"param": "min_confidence", "old": current,
                                    "new": new_val, "reason": reason})
                     logger.info(f"🧠 DERS: {reason}")
+        elif "min_confidence" in already_changed:
+            logger.debug("ℹ️ min_confidence bu döngüde zaten ayarlandı, kayıp analizi atlıyor")
 
         # 2. En çok eksik olan bileşeni kontrol et → confluence eşiğini ayarla
+        #    (Adım 3'te zaten ayarlandıysa atla — çift ayarlama koruması)
         missing = loss_info.get("missing_components", {})
         total_losses = loss_info["total_losses"]
 
-        # Displacement kayıplarda çok eksikse → displacement cezasını artır
-        disp_missing = missing.get("DISPLACEMENT", 0)
-        if total_losses > 0 and disp_missing / total_losses > 0.6:
-            current = get_bot_param("displacement_min_body_ratio",
-                                   ICT_PARAMS["displacement_min_body_ratio"])
-            # Displacement parametresini sıkılaştırmak yerine, confluence eşiğini hafif artır
-            current_conf = get_bot_param("min_confluence_score", ICT_PARAMS["min_confluence_score"])
-            new_conf = min(80, current_conf + 1.0)
-            if new_conf > current_conf:
-                save_bot_param("min_confluence_score", new_conf, ICT_PARAMS["min_confluence_score"])
-                reason = (f"Kayıpların %{disp_missing/total_losses*100:.0f}'inde DISPLACEMENT eksik — "
-                         f"confluence {current_conf} → {new_conf}")
-                add_optimization_log("min_confluence_score", current_conf, new_conf, reason,
-                                    stats["win_rate"], stats["win_rate"], stats["total_trades"])
-                changes.append({"param": "min_confluence_score", "old": current_conf,
-                               "new": new_conf, "reason": reason})
-                logger.info(f"🧠 DERS: {reason}")
+        # Displacement kayıplarda çok eksikse → confluence eşiğini hafif artır
+        if "min_confluence_score" not in already_changed:
+            disp_missing = missing.get("DISPLACEMENT", 0)
+            if total_losses > 0 and disp_missing / total_losses > 0.6:
+                current = get_bot_param("displacement_min_body_ratio",
+                                       ICT_PARAMS["displacement_min_body_ratio"])
+                # Displacement parametresini sıkılaştırmak yerine, confluence eşiğini hafif artır
+                current_conf = get_bot_param("min_confluence_score", ICT_PARAMS["min_confluence_score"])
+                new_conf = min(80, current_conf + 1.0)
+                if new_conf > current_conf:
+                    save_bot_param("min_confluence_score", new_conf, ICT_PARAMS["min_confluence_score"])
+                    reason = (f"Kayıpların %{disp_missing/total_losses*100:.0f}'inde DISPLACEMENT eksik — "
+                             f"confluence {current_conf} → {new_conf}")
+                    add_optimization_log("min_confluence_score", current_conf, new_conf, reason,
+                                        stats["win_rate"], stats["win_rate"], stats["total_trades"])
+                    changes.append({"param": "min_confluence_score", "old": current_conf,
+                                   "new": new_conf, "reason": reason})
+                    logger.info(f"🧠 DERS: {reason}")
+        else:
+            logger.debug("ℹ️ min_confluence_score bu döngüde zaten ayarlandı, kayıp analizi atlıyor")
 
         # 3. HTF onaysız kayıplar çoksa → uyar
         htf_missing = missing.get("HTF_CONFIRMATION", 0)
@@ -573,7 +603,8 @@ class SelfOptimizer:
             logger.info(f"🧠 NOT: {reason}")
 
         # 5. Ortalama kayıp büyükse → SL mesafesini kontrol et
-        if loss_info["avg_loss_pct"] > 2.0:
+        #    (Adım 4'te zaten ayarlandıysa atla — çelişkili yön koruması)
+        if "default_sl_pct" not in already_changed and loss_info["avg_loss_pct"] > 2.0:
             current_sl = get_bot_param("default_sl_pct", ICT_PARAMS["default_sl_pct"])
             # SL çok geniş olabilir, daralt
             new_sl = max(0.008, current_sl * 0.92)
@@ -587,6 +618,8 @@ class SelfOptimizer:
                 changes.append({"param": "default_sl_pct", "old": current_sl,
                                "new": new_sl, "reason": reason})
                 logger.info(f"🧠 DERS: {reason}")
+        elif "default_sl_pct" in already_changed:
+            logger.debug("ℹ️ default_sl_pct bu döngüde zaten ayarlandı, kayıp analizi atlıyor")
 
         # Ders özetini logla
         for lesson in loss_info.get("lesson_summary", []):

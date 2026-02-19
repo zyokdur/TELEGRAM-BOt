@@ -130,7 +130,9 @@ class ForexICTEngine:
                     raw = raw.rename(columns={"datetime": "timestamp"})
                 elif "date" in raw.columns:
                     raw = raw.rename(columns={"date": "timestamp"})
-                raw["group"] = raw.index // 4
+                # 4 saatlik pencerelere göre grupla (hafta sonu boşluklarını doğru işler)
+                raw["timestamp"] = pd.to_datetime(raw["timestamp"], utc=True)
+                raw["group"] = raw["timestamp"].dt.floor("4h")
                 df = raw.groupby("group").agg({
                     "timestamp": "first", "open": "first",
                     "high": "max", "low": "min",
@@ -163,15 +165,45 @@ class ForexICTEngine:
         try:
             ticker = yf.Ticker(inst["yf_symbol"])
             info = ticker.fast_info
+
+            def _safe_get(obj, *keys):
+                """fast_info'dan güvenli değer oku (dict veya attribute)"""
+                for k in keys:
+                    try:
+                        if hasattr(obj, 'get'):
+                            v = obj.get(k, None)
+                            if v is not None and v != 0:
+                                return float(v)
+                        v = getattr(obj, k, None)
+                        if v is not None and v != 0:
+                            return float(v)
+                    except Exception:
+                        continue
+                return 0.0
+
+            last = _safe_get(info, "lastPrice", "last_price", "regularMarketPrice")
+            prev = _safe_get(info, "previousClose", "previous_close", "regularMarketPreviousClose")
+            if last == 0:
+                last = prev
+
             return {
-                "last": round(float(info.get("lastPrice", 0) or info.get("previousClose", 0)), 5),
-                "prev_close": round(float(info.get("previousClose", 0)), 5),
-                "open": round(float(info.get("open", 0)), 5),
-                "day_high": round(float(info.get("dayHigh", 0)), 5),
-                "day_low": round(float(info.get("dayLow", 0)), 5),
+                "last": round(last, 5),
+                "prev_close": round(prev, 5),
+                "open": round(_safe_get(info, "open", "regularMarketOpen"), 5),
+                "day_high": round(_safe_get(info, "dayHigh", "day_high", "regularMarketDayHigh"), 5),
+                "day_low": round(_safe_get(info, "dayLow", "day_low", "regularMarketDayLow"), 5),
             }
         except Exception as e:
             logger.error(f"Fiyat hatasi ({instrument_key}): {e}")
+            # Fallback: son mum kapanışını kullan
+            try:
+                df = self.get_candles(instrument_key, "15m")
+                if not df.empty:
+                    cp = float(df["close"].iloc[-1])
+                    return {"last": round(cp, 5), "prev_close": round(cp, 5),
+                            "open": round(cp, 5), "day_high": round(cp, 5), "day_low": round(cp, 5)}
+            except Exception:
+                pass
             return None
 
     # ================================================================
@@ -1007,16 +1039,17 @@ class ForexICTEngine:
             confluence_count["bear"] += 1
             reasons_bear.append(f"Aktif Bearish OB icinde (guc: {bear_ob[0]['strength']}x)")
 
-        # 3. Breaker Blocks (10 puan)
-        for bb in breakers:
-            if bb["type"] == "BULLISH_BREAKER":
-                bull_score += 10
-                confluence_count["bull"] += 1
-                reasons_bull.append("Bullish Breaker Block destegi")
-            elif bb["type"] == "BEARISH_BREAKER":
-                bear_score += 10
-                confluence_count["bear"] += 1
-                reasons_bear.append("Bearish Breaker Block direnci")
+        # 3. Breaker Blocks (10 puan - tip başına tek seferlik)
+        has_bull_breaker = any(bb["type"] == "BULLISH_BREAKER" for bb in breakers)
+        has_bear_breaker = any(bb["type"] == "BEARISH_BREAKER" for bb in breakers)
+        if has_bull_breaker:
+            bull_score += 10
+            confluence_count["bull"] += 1
+            reasons_bull.append(f"Bullish Breaker Block destegi ({sum(1 for bb in breakers if bb['type']=='BULLISH_BREAKER')} adet)")
+        if has_bear_breaker:
+            bear_score += 10
+            confluence_count["bear"] += 1
+            reasons_bear.append(f"Bearish Breaker Block direnci ({sum(1 for bb in breakers if bb['type']=='BEARISH_BREAKER')} adet)")
 
         # 4. FVG (15 puan) - doldurulmamis, CE test edilmis olanlar daha guclu
         active_fvgs = [f for f in fvgs if not f["filled"] and f["idx"] >= len(df) - 15]
@@ -1062,14 +1095,15 @@ class ForexICTEngine:
                 confluence_count["bear"] += 1
                 reasons_bear.append("Sell-side likidite avi - dusus beklentisi")
 
-        # 7. Inducement (5 puan)
-        for ind in inducements:
-            if ind["type"] == "BULLISH_INDUCEMENT":
-                bull_score += 5
-                reasons_bull.append("Bullish Inducement - likidite toplandi")
-            elif ind["type"] == "BEARISH_INDUCEMENT":
-                bear_score += 5
-                reasons_bear.append("Bearish Inducement - likidite toplandi")
+        # 7. Inducement (5 puan - tip başına tek seferlik)
+        bull_ind_count = sum(1 for ind in inducements if ind["type"] == "BULLISH_INDUCEMENT")
+        bear_ind_count = sum(1 for ind in inducements if ind["type"] == "BEARISH_INDUCEMENT")
+        if bull_ind_count > 0:
+            bull_score += 5
+            reasons_bull.append(f"Bullish Inducement - likidite toplandi ({bull_ind_count} adet)")
+        if bear_ind_count > 0:
+            bear_score += 5
+            reasons_bear.append(f"Bearish Inducement - likidite toplandi ({bear_ind_count} adet)")
 
         # 8. OTE (10 puan)
         if ote:

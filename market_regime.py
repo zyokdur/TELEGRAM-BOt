@@ -379,7 +379,7 @@ class MarketRegime:
             return REGIME_RISK_ON
 
         # RISK OFF: BTC düşüyor + para çıkıyor
-        if btc_bias == "SHORT" and flow_dir in ("OUTFLOW", "PANIC_SELL"):
+        if btc_bias == "SHORT" and flow_dir == "OUTFLOW":
             return REGIME_RISK_OFF
         if btc_bias == "SHORT" and btc_strength in ("STRONG", "MODERATE"):
             return REGIME_RISK_OFF
@@ -565,9 +565,19 @@ class MarketRegime:
         if not self._regime_cache:
             return {
                 "regime": "UNKNOWN",
+                "regime_label": "Veri Bekleniyor",
+                "regime_emoji": "❓",
                 "btc_bias": "UNKNOWN",
+                "btc_details": {"bias": "UNKNOWN", "strength": "WEAK", "momentum": 0, "change_pcts": {}},
+                "btc_dominance": {"direction": "UNKNOWN", "spread": 0, "btc_change": 0, "alt_avg_change": 0},
+                "usdt_flow": {"direction": "UNKNOWN", "volume_change_pct": 0, "price_direction": "NEUTRAL"},
+                "long_candidates": [],
+                "short_candidates": [],
                 "long_count": 0,
                 "short_count": 0,
+                "rs_rankings": [],
+                "total_coins": 0,
+                "timestamp": 0,
             }
 
         r = self._regime_cache
@@ -602,7 +612,7 @@ class MarketRegime:
         return ema_val
 
     def _neutral_result(self, coin_list):
-        """Veri yetersizse nötr sonuç döndür"""
+        """Veri yetersizse nötr sonuç döndür — tüm coinlere izin ver ama aday listesi boş"""
         filtered = {}
         for symbol in coin_list:
             if not self._is_btc(symbol):
@@ -610,19 +620,19 @@ class MarketRegime:
                     "allowed_directions": ["LONG", "SHORT"],
                     "rs_score": 0,
                     "rs_data": None,
-                    "is_candidate": True,
+                    "is_candidate": False,
                 }
         return {
             "regime": REGIME_NEUTRAL,
             "regime_details": {
-                "btc_trend": {"bias": "NEUTRAL", "strength": "WEAK"},
-                "btc_dominance": {"direction": "NEUTRAL"},
-                "usdt_flow": {"direction": "NEUTRAL"},
+                "btc_trend": {"bias": "NEUTRAL", "strength": "WEAK", "momentum": 0, "change_pcts": {}},
+                "btc_dominance": {"direction": "NEUTRAL", "spread": 0, "btc_change": 0, "alt_avg_change": 0},
+                "usdt_flow": {"direction": "NEUTRAL", "volume_change_pct": 0, "price_direction": "NEUTRAL"},
             },
             "btc_bias": "NEUTRAL",
             "rs_rankings": [],
-            "long_candidates": list(filtered.keys()),
-            "short_candidates": list(filtered.keys()),
+            "long_candidates": [],
+            "short_candidates": [],
             "filtered_coins": filtered,
             "timestamp": time.time(),
         }
