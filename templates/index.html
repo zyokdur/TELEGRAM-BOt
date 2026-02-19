@@ -2,7 +2,7 @@
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ICT Trading Bot - Smart Signal Engine</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -196,7 +196,7 @@
                         <h2>ICT Aktif Sinyaller</h2>
                         <span class="content-subtitle">Smart Money Concepts - Gerçek zamanlı trade takibi</span>
                     </div>
-                    <button class="btn-icon" onclick="loadActiveSignals()" title="Yenile">
+                    <button class="btn-icon" onclick="refreshWithFeedback(this, loadActiveSignals)" title="Yenile">
                         <i class="fas fa-arrows-rotate"></i>
                     </button>
                 </div>
@@ -246,7 +246,7 @@
                             <i class="fas fa-fire"></i>
                             <span id="activeCoinCount">0</span> aktif coin
                         </div>
-                        <button class="btn-icon" onclick="loadCoins()" title="Yenile">
+                        <button class="btn-icon" onclick="refreshWithFeedback(this, loadCoins)" title="Yenile">
                             <i class="fas fa-arrows-rotate"></i>
                         </button>
                     </div>
@@ -254,12 +254,7 @@
                 <div class="search-bar">
                     <i class="fas fa-magnifying-glass"></i>
                     <input type="text" id="coinSearchInput" placeholder="Coin ara... (BTC, ETH, SOL)" oninput="filterCoins()">
-                    <div class="coin-tf-filters">
-                        <button class="coin-tf-btn active" data-filter="all" onclick="filterCoinsByTf('all')">Tümü</button>
-                        <button class="coin-tf-btn" data-filter="15m" onclick="filterCoinsByTf('15m')">15D</button>
-                        <button class="coin-tf-btn" data-filter="1H" onclick="filterCoinsByTf('1H')">1S</button>
-                        <button class="coin-tf-btn" data-filter="4H" onclick="filterCoinsByTf('4H')">4S</button>
-                    </div>
+
                 </div>
                 <div class="card coins-card">
                     <div class="table-wrapper">
@@ -297,7 +292,7 @@
                         <h2>İzleme Listesi</h2>
                         <span class="content-subtitle">Onay bekleyen potansiyel sinyaller</span>
                     </div>
-                    <button class="btn-icon" onclick="loadWatchlist()" title="Yenile">
+                    <button class="btn-icon" onclick="refreshWithFeedback(this, loadWatchlist)" title="Yenile">
                         <i class="fas fa-arrows-rotate"></i>
                     </button>
                 </div>
@@ -349,11 +344,11 @@
                         <h2>Piyasa Rejimi & Rölatif Güç</h2>
                         <span class="content-subtitle">BTC Trend, BTC.D Proxy, Para Akışı Analizi</span>
                     </div>
-                    <div style="display:flex;gap:8px;align-items:center">
+                    <div class="flex-actions">
                         <button class="btn-icon" onclick="refreshRegimeManual()" title="Rejim Analizi Yap (OKX'ten çeker)">
                             <i class="fas fa-satellite-dish"></i>
                         </button>
-                        <button class="btn-icon" onclick="loadRegime()" title="Cache'den Yenile">
+                        <button class="btn-icon" onclick="refreshWithFeedback(this, loadRegime)" title="Cache'den Yenile">
                             <i class="fas fa-arrows-rotate"></i>
                         </button>
                     </div>
@@ -446,7 +441,7 @@
                         <h2>Geçmiş İşlemler</h2>
                         <span class="content-subtitle">Tamamlanmış sinyaller ve sonuçları</span>
                     </div>
-                    <button class="btn-icon" onclick="loadHistory()" title="Yenile">
+                    <button class="btn-icon" onclick="refreshWithFeedback(this, loadHistory)" title="Yenile">
                         <i class="fas fa-arrows-rotate"></i>
                     </button>
                 </div>
@@ -505,7 +500,7 @@
                         <h2>Bileşen Performansı</h2>
                         <span class="content-subtitle">ICT strateji bileşenlerinin etkinlik analizi</span>
                     </div>
-                    <button class="btn-icon" onclick="loadPerformance()" title="Yenile">
+                    <button class="btn-icon" onclick="refreshWithFeedback(this, loadPerformance)" title="Yenile">
                         <i class="fas fa-arrows-rotate"></i>
                     </button>
                 </div>
@@ -527,7 +522,7 @@
                         <span class="content-subtitle">AI destekli parametre öğrenme motoru</span>
                     </div>
                     <div class="content-header-actions">
-                        <button class="btn-icon" onclick="loadOptimization()" title="Yenile">
+                        <button class="btn-icon" onclick="refreshWithFeedback(this, loadOptimization)" title="Yenile">
                             <i class="fas fa-arrows-rotate"></i>
                         </button>
                         <button class="btn-primary" onclick="runOptimization()">
@@ -563,16 +558,16 @@
                         <div class="opt-card-icon amber"><i class="fas fa-clock-rotate-left"></i></div>
                         <div class="opt-card-body">
                             <span class="opt-card-label">Son Optimizasyon</span>
-                            <span class="opt-card-value" id="optLastDate" style="font-size:13px">Henüz çalışmadı</span>
+                            <span class="opt-card-value opt-card-value-sm" id="optLastDate">Henüz çalışmadı</span>
                         </div>
                     </div>
                 </div>
 
-                <div style="padding:0 20px 12px;font-size:13px;" id="optTradeInfo">
-                    <span style="color:var(--text-muted)"><i class="fas fa-info-circle"></i> İşlem bilgisi yükleniyor...</span>
+                <div class="opt-trade-info" id="optTradeInfo">
+                    <span class="td-muted"><i class="fas fa-info-circle"></i> İşlem bilgisi yükleniyor...</span>
                 </div>
 
-                <div class="card" style="margin-bottom:20px;">
+                <div class="card card-mb">
                     <div class="card-header">
                         <i class="fas fa-sliders"></i>
                         <span>Güncellenen Parametreler</span>

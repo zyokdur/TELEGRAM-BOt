@@ -321,19 +321,19 @@ async function loadActiveSignals() {
         const coinDisplay = `<div class="coin-symbol"><span class="coin-name">${coinParts[0]}</span><span class="coin-pair">/${coinParts[1]}</span></div>`;
 
         return `<tr ondblclick="openICTChart('${s.symbol}')" class="signal-row-clickable" title="Çift tıkla → ICT Chart">
-            <td style="color:var(--text-muted)">#${s.id}</td>
+            <td class="td-muted">#${s.id}</td>
             <td>${coinDisplay}</td>
             <td>${dirBadge}</td>
             <td>${formatPrice(s.entry_price)}</td>
             <td>${s.current_price ? formatPrice(s.current_price) : "--"}</td>
-            <td style="color:var(--red)">${formatPrice(s.stop_loss)}</td>
-            <td style="color:var(--green)">${formatPrice(s.take_profit)}</td>
+            <td class="td-sl">${formatPrice(s.stop_loss)}</td>
+            <td class="td-tp">${formatPrice(s.take_profit)}</td>
             <td>
                 <div class="confidence-bar">
                     <div class="confidence-track">
                         <div class="confidence-fill ${confClass}" style="width:${confidence}%"></div>
                     </div>
-                    <span style="font-size:11px;color:var(--text-secondary)">${confidence}%</span>
+                    <span class="td-conf">${confidence}%</span>
                 </div>
             </td>
             <td><span class="${pnlClass}">${pnlText}</span></td>
@@ -357,7 +357,6 @@ async function cancelSignal(signalId) {
 // =================== COINS ===================
 
 let allCoinsData = [];
-let currentCoinTfFilter = "all";
 
 async function loadCoins() {
     const data = await apiFetch("/api/coins");
@@ -375,12 +374,6 @@ async function loadCoins() {
     }
 
     renderCoinsTable(allCoinsData);
-}
-
-function filterCoinsByTf(tf) {
-    currentCoinTfFilter = tf;
-    document.querySelectorAll(".coin-tf-btn").forEach(b => b.classList.toggle("active", b.dataset.filter === tf));
-    filterCoins();
 }
 
 function filterCoins() {
@@ -509,10 +502,10 @@ async function loadWatchlist() {
                     <div class="confidence-track" style="width:60px">
                         <div class="confidence-fill medium" style="width:${progressPct}%"></div>
                     </div>
-                    <span style="font-size:11px;color:var(--text-muted)">${item.candles_watched}/${item.max_watch_candles}</span>
+                    <span class="watch-progress">${item.candles_watched}/${item.max_watch_candles}</span>
                 </div>
             </td>
-            <td style="font-size:11px;color:var(--text-secondary);font-family:var(--font);max-width:200px">${item.watch_reason || "--"}</td>
+            <td class="watch-reason">${item.watch_reason || "--"}</td>
             <td><span class="badge badge-watching"><i class="fas fa-eye"></i> İzleniyor</span></td>
         </tr>`;
     }).join("");
@@ -599,17 +592,17 @@ async function loadHistory() {
         const coinDisplay = `<div class="coin-symbol"><span class="coin-name">${coinParts[0]}</span><span class="coin-pair">/${coinParts[1]}</span></div>`;
 
         return `<tr>
-            <td style="color:var(--text-muted)">#${s.id}</td>
+            <td class="td-muted">#${s.id}</td>
             <td>${coinDisplay}</td>
             <td>${dirBadge}</td>
             <td>${formatPrice(s.entry_price)}</td>
             <td>${s.close_price ? formatPrice(s.close_price) : "--"}</td>
-            <td style="color:var(--red)">${formatPrice(s.stop_loss)}</td>
-            <td style="color:var(--green)">${formatPrice(s.take_profit)}</td>
+            <td class="td-sl">${formatPrice(s.stop_loss)}</td>
+            <td class="td-tp">${formatPrice(s.take_profit)}</td>
             <td><span class="${pnlClass}">${pnlText}</span></td>
             <td>${s.confidence ? s.confidence.toFixed(0) + "%" : "--"}</td>
             <td>${statusBadge}</td>
-            <td style="font-size:11px;color:var(--text-muted);font-family:var(--font)">${formatDate(s.created_at)}</td>
+            <td class="td-date">${formatDate(s.created_at)}</td>
         </tr>`;
     }).join("");
 }
@@ -639,9 +632,9 @@ async function loadOptimization() {
             const p = summary.performance;
             const minNeeded = 5;
             if (p.total_trades < minNeeded) {
-                tradeInfoEl.innerHTML = `<span style="color:var(--yellow)"><i class="fas fa-exclamation-triangle"></i> ${p.total_trades}/${minNeeded} tamamlanmış işlem (${minNeeded - p.total_trades} daha gerekli)</span>`;
+                tradeInfoEl.innerHTML = `<span class="td-sl"><i class="fas fa-exclamation-triangle"></i> ${p.total_trades}/${minNeeded} tamamlanmış işlem (${minNeeded - p.total_trades} daha gerekli)</span>`;
             } else {
-                tradeInfoEl.innerHTML = `<span style="color:var(--green)"><i class="fas fa-check-circle"></i> ${p.total_trades} tamamlanmış işlem — optimizer aktif</span>`;
+                tradeInfoEl.innerHTML = `<span class="td-tp"><i class="fas fa-check-circle"></i> ${p.total_trades} tamamlanmış işlem — optimizer aktif</span>`;
             }
         }
 
@@ -953,18 +946,18 @@ async function loadRegime() {
         if (isShort) statusBadge = '<span class="badge badge-short"><i class="fas fa-arrow-down"></i> SHORT Aday</span>';
 
         return `<tr>
-            <td style="color:var(--text-muted)">${idx + 1}</td>
+            <td class="td-muted">${idx + 1}</td>
             <td>${coinName}</td>
             <td>
-                <div style="display:flex;align-items:center;gap:8px">
-                    <div style="width:60px;height:6px;border-radius:3px;background:rgba(255,255,255,0.06);overflow:hidden">
-                        <div style="width:${rsBar}%;height:100%;border-radius:3px;background:${rsColor}"></div>
+                <div class="rs-bar-wrap">
+                    <div class="rs-bar-track">
+                        <div class="rs-bar-fill" style="width:${rsBar}%;background:${rsColor}"></div>
                     </div>
-                    <span class="${rsClass}" style="font-weight:700;font-family:'JetBrains Mono',monospace">${rs > 0 ? "+" : ""}${rs.toFixed(2)}</span>
+                    <span class="${rsClass} rs-score">${rs > 0 ? "+" : ""}${rs.toFixed(2)}</span>
                 </div>
             </td>
             <td><span class="${chgClass}">${chgText}</span></td>
-            <td style="color:${volColor};font-family:'JetBrains Mono',monospace">${vol.toFixed(2)}x</td>
+            <td class="rs-score" style="color:${volColor}">${vol.toFixed(2)}x</td>
             <td><span class="${strsClass}">${strs > 0 ? "+" : ""}${strs.toFixed(2)}</span></td>
             <td>${statusBadge}</td>
         </tr>`;
@@ -1030,6 +1023,18 @@ function removeToast(toast) {
 }
 
 // =================== HELPERS ===================
+
+async function refreshWithFeedback(btn, loadFn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("refreshing");
+    try {
+        await loadFn();
+    } finally {
+        btn.classList.remove("refreshing");
+        btn.disabled = false;
+    }
+}
 
 function formatPrice(price) {
     if (!price && price !== 0) return "--";
