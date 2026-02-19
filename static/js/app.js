@@ -509,7 +509,7 @@ async function loadWatchlist() {
                     <span style="font-size:11px;color:var(--text-muted)">${item.candles_watched}/${item.max_watch_candles}</span>
                 </div>
             </td>
-            <td style="font-size:11px;color:var(--text-secondary);font-family:var(--font-main);max-width:200px">${item.watch_reason || "--"}</td>
+            <td style="font-size:11px;color:var(--text-secondary);font-family:var(--font);max-width:200px">${item.watch_reason || "--"}</td>
             <td><span class="badge badge-watching"><i class="fas fa-eye"></i> İzleniyor</span></td>
         </tr>`;
     }).join("");
@@ -606,7 +606,7 @@ async function loadHistory() {
             <td><span class="${pnlClass}">${pnlText}</span></td>
             <td>${s.confidence ? s.confidence.toFixed(0) + "%" : "--"}</td>
             <td>${statusBadge}</td>
-            <td style="font-size:11px;color:var(--text-muted);font-family:var(--font-main)">${formatDate(s.created_at)}</td>
+            <td style="font-size:11px;color:var(--text-muted);font-family:var(--font)">${formatDate(s.created_at)}</td>
         </tr>`;
     }).join("");
 }

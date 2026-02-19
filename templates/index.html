@@ -505,8 +505,10 @@
                         <h2>Bileşen Performansı</h2>
                         <span class="content-subtitle">ICT strateji bileşenlerinin etkinlik analizi</span>
                     </div>
+                    <button class="btn-icon" onclick="loadPerformance()" title="Yenile">
+                        <i class="fas fa-arrows-rotate"></i>
+                    </button>
                 </div>
-                <div class="perf-section-label"><i class="fas fa-signal"></i> ICT Bileşenleri</div>
                 <div class="perf-grid" id="performanceGrid">
                     <div class="empty-state">
                         <div class="empty-icon"><i class="fas fa-chart-pie"></i></div>
@@ -524,10 +526,15 @@
                         <h2>Otomatik Optimizasyon</h2>
                         <span class="content-subtitle">AI destekli parametre öğrenme motoru</span>
                     </div>
-                    <button class="btn-primary" onclick="runOptimization()">
-                        <i class="fas fa-wand-magic-sparkles"></i>
-                        <span>Manuel Çalıştır</span>
-                    </button>
+                    <div class="content-header-actions">
+                        <button class="btn-icon" onclick="loadOptimization()" title="Yenile">
+                            <i class="fas fa-arrows-rotate"></i>
+                        </button>
+                        <button class="btn-primary" onclick="runOptimization()">
+                            <i class="fas fa-wand-magic-sparkles"></i>
+                            <span>Manuel Çalıştır</span>
+                        </button>
+                    </div>
                 </div>
 
                 <div class="opt-summary">
@@ -1213,7 +1220,7 @@
         <div class="ict-chart-modal" onclick="event.stopPropagation()">
             <div class="ict-chart-header">
                 <div class="ict-chart-title">
-                    <i class="fas fa-chart-candlestick"></i>
+                    <i class="fas fa-chart-line"></i>
                     <span id="ictChartSymbol">---</span>
                     <span class="ict-chart-tf">15m</span>
                     <span class="ict-chart-bias" id="ictChartBias">---</span>
