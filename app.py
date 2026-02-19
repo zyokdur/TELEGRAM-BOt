@@ -413,6 +413,224 @@ def api_analyze_symbol(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/chart-data/<symbol>")
+def api_chart_data(symbol):
+    """
+    ICT Chart verisi: 15m mumları + tüm ICT çizim katmanları.
+    Aktif sinyallerdeki coin'e çift tıklandığında chart açılır.
+    """
+    try:
+        multi_tf = data_fetcher.get_multi_timeframe_data(symbol)
+        ltf_data = multi_tf.get("15m")
+
+        if ltf_data is None or ltf_data.empty:
+            return jsonify({"error": "Veri alınamadı"}), 400
+
+        # Mum verileri (Lightweight Charts formatı)
+        candles = []
+        for _, row in ltf_data.iterrows():
+            candles.append({
+                "time": int(row["timestamp"].timestamp()),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]) if "volume" in row else 0
+            })
+
+        # ICT bileşenleri hesapla
+        structure = ict_strategy.detect_market_structure(ltf_data)
+        active_obs, all_obs = ict_strategy.find_order_blocks(ltf_data, structure)
+        breaker_blocks = ict_strategy.find_breaker_blocks(all_obs, ltf_data)
+        fvgs = ict_strategy.find_fvg(ltf_data)
+        displacements = ict_strategy.detect_displacement(ltf_data, lookback=30)
+        liquidity_levels = ict_strategy.find_liquidity_levels(ltf_data)
+        pd_zone = ict_strategy.calculate_premium_discount(ltf_data, structure)
+
+        # HTF bias
+        htf_result = ict_strategy._analyze_htf_bias(multi_tf)
+        htf_bias = htf_result["bias"] if htf_result else None
+
+        # Sweep event
+        sweep = None
+        if htf_bias:
+            sweep = ict_strategy._find_sweep_event(ltf_data, htf_bias)
+
+        # Aktif sinyal bilgisi (entry/sl/tp çizgileri için)
+        active_signal = None
+        active_signals = get_active_signals()
+        for s in active_signals:
+            if s["symbol"] == symbol:
+                active_signal = {
+                    "direction": s["direction"],
+                    "entry": float(s["entry_price"]),
+                    "sl": float(s["stop_loss"]),
+                    "tp": float(s["take_profit"]),
+                    "status": s["status"],
+                    "confidence": s.get("confidence", 0)
+                }
+                break
+
+        # Swing points
+        swing_highs_data = []
+        for sh in structure.get("swing_highs", []):
+            if sh["index"] < len(ltf_data):
+                swing_highs_data.append({
+                    "time": int(ltf_data.iloc[sh["index"]]["timestamp"].timestamp()),
+                    "price": float(sh["price"]),
+                    "type": sh.get("fractal_type", "MAJOR")
+                })
+
+        swing_lows_data = []
+        for sl_p in structure.get("swing_lows", []):
+            if sl_p["index"] < len(ltf_data):
+                swing_lows_data.append({
+                    "time": int(ltf_data.iloc[sl_p["index"]]["timestamp"].timestamp()),
+                    "price": float(sl_p["price"]),
+                    "type": sl_p.get("fractal_type", "MAJOR")
+                })
+
+        # Order Blocks → dikdörtgen bölgeler
+        obs_data = []
+        for ob in active_obs:
+            if ob["index"] < len(ltf_data):
+                obs_data.append({
+                    "time": int(ltf_data.iloc[ob["index"]]["timestamp"].timestamp()),
+                    "high": float(ob["high"]),
+                    "low": float(ob["low"]),
+                    "type": ob["type"],
+                    "strength": round(ob.get("strength", 0), 2)
+                })
+
+        # FVGs → dikdörtgen bölgeler
+        fvgs_data = []
+        for fvg in fvgs:
+            if fvg["index"] < len(ltf_data):
+                fvgs_data.append({
+                    "time": int(ltf_data.iloc[fvg["index"]]["timestamp"].timestamp()),
+                    "high": float(fvg["high"]),
+                    "low": float(fvg["low"]),
+                    "type": fvg["type"],
+                    "size_pct": fvg.get("size_pct", 0)
+                })
+
+        # Displacement mumları
+        disp_data = []
+        for d in displacements:
+            if d["index"] < len(ltf_data):
+                disp_data.append({
+                    "time": int(ltf_data.iloc[d["index"]]["timestamp"].timestamp()),
+                    "direction": d["direction"],
+                    "body_ratio": d.get("body_ratio", 0),
+                    "atr_multiple": d.get("atr_multiple", 0)
+                })
+
+        # BOS/CHoCH yapısal kırılımlar
+        bos_data = []
+        for bos in structure.get("bos_events", []):
+            if bos["index"] < len(ltf_data):
+                bos_data.append({
+                    "time": int(ltf_data.iloc[bos["index"]]["timestamp"].timestamp()),
+                    "type": bos["type"],
+                    "price": float(bos["price"]),
+                    "prev_price": float(bos["prev_price"])
+                })
+
+        choch_data = []
+        for ch in structure.get("choch_events", []):
+            if ch["index"] < len(ltf_data):
+                choch_data.append({
+                    "time": int(ltf_data.iloc[ch["index"]]["timestamp"].timestamp()),
+                    "type": ch["type"],
+                    "price": float(ch["price"]),
+                    "prev_price": float(ch["prev_price"])
+                })
+
+        # Sweep event
+        sweep_data = None
+        if sweep:
+            sidx = sweep["sweep_candle_idx"]
+            if sidx < len(ltf_data):
+                sweep_data = {
+                    "time": int(ltf_data.iloc[sidx]["timestamp"].timestamp()),
+                    "swept_level": float(sweep["swept_level"]),
+                    "sweep_wick": float(sweep.get("sweep_wick", sweep["swept_level"])),
+                    "type": sweep["sweep_type"],
+                    "quality": sweep.get("sweep_quality", 1.0)
+                }
+
+        # Premium/Discount bölgeleri
+        pd_data = None
+        if pd_zone:
+            pd_data = {
+                "equilibrium": float(pd_zone["equilibrium"]),
+                "high": float(pd_zone["high"]),
+                "low": float(pd_zone["low"]),
+                "zone": pd_zone["zone"],
+                "in_ote": pd_zone.get("in_ote", False),
+                "ote_high": float(pd_zone.get("ote_high", 0)),
+                "ote_low": float(pd_zone.get("ote_low", 0))
+            }
+
+        # Liquidity levels
+        liq_data = []
+        for liq in liquidity_levels:
+            liq_data.append({
+                "price": float(liq["price"]),
+                "type": liq["type"],
+                "touches": liq.get("touches", 2),
+                "swept": liq.get("swept", False)
+            })
+
+        # Breaker blocks
+        breaker_data = []
+        for bb in breaker_blocks:
+            if bb["index"] < len(ltf_data):
+                breaker_data.append({
+                    "time": int(ltf_data.iloc[bb["index"]]["timestamp"].timestamp()),
+                    "high": float(bb["high"]),
+                    "low": float(bb["low"]),
+                    "type": bb["type"]
+                })
+
+        result = {
+            "symbol": symbol,
+            "candles": candles,
+            "htf_bias": htf_bias,
+            "ltf_trend": structure.get("trend", "NEUTRAL"),
+            "swing_highs": swing_highs_data,
+            "swing_lows": swing_lows_data,
+            "order_blocks": obs_data,
+            "fvgs": fvgs_data,
+            "displacements": disp_data,
+            "bos_events": bos_data,
+            "choch_events": choch_data,
+            "sweep": sweep_data,
+            "premium_discount": pd_data,
+            "liquidity_levels": liq_data,
+            "breaker_blocks": breaker_data,
+            "active_signal": active_signal
+        }
+
+        # numpy tiplerini Python native'e çevir
+        def _serialize(obj):
+            if hasattr(obj, "item"):         # numpy scalar (int64, float64, bool_)
+                return obj.item()
+            if hasattr(obj, "isoformat"):     # datetime/Timestamp
+                return obj.isoformat()
+            return str(obj)
+
+        return app.response_class(
+            response=json.dumps(result, default=_serialize),
+            status=200,
+            mimetype="application/json"
+        )
+
+    except Exception as e:
+        logger.error(f"Chart data hatası ({symbol}): {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/coin-detail/<symbol>")
 def api_coin_detail(symbol):
     """

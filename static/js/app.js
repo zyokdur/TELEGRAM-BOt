@@ -317,7 +317,7 @@ async function loadActiveSignals() {
         const coinParts = s.symbol.split("-");
         const coinDisplay = `<div class="coin-symbol"><span class="coin-name">${coinParts[0]}</span><span class="coin-pair">/${coinParts[1]}</span></div>`;
 
-        return `<tr>
+        return `<tr ondblclick="openICTChart('${s.symbol}')" class="signal-row-clickable" title="Çift tıkla → ICT Chart">
             <td style="color:var(--text-muted)">#${s.id}</td>
             <td>${coinDisplay}</td>
             <td>${dirBadge}</td>
@@ -2206,3 +2206,555 @@ function closeFxDetail() {
     if (tfBar) tfBar.style.display = "flex";
     if (sessionBar) sessionBar.style.display = "flex";
 }
+
+// =================== ICT CHART ===================
+
+let ictChart = null;
+let ictCandleSeries = null;
+let ictVolumeSeries = null;
+let ictChartData = null;
+let ictExtraSeriesList = [];
+
+function openICTChart(symbol) {
+    const overlay = document.getElementById("ictChartOverlay");
+    overlay.classList.add("active");
+    document.getElementById("ictChartSymbol").textContent = symbol;
+    document.getElementById("ictChartLoading").style.display = "flex";
+    document.getElementById("ictChartContainer").innerHTML = "";
+
+    // Eski chart'ı temizle
+    if (ictChart) {
+        ictChart.remove();
+        ictChart = null;
+    }
+    ictExtraSeriesList = [];
+
+    // Veri çek ve render et
+    fetchICTChartData(symbol);
+}
+
+function closeICTChart(event) {
+    if (event) event.stopPropagation();
+    const overlay = document.getElementById("ictChartOverlay");
+    overlay.classList.remove("active");
+    if (ictChart) {
+        ictChart.remove();
+        ictChart = null;
+    }
+    ictExtraSeriesList = [];
+}
+
+async function fetchICTChartData(symbol) {
+    try {
+        const resp = await fetch(`/api/chart-data/${symbol}`);
+        if (!resp.ok) throw new Error("API hatası");
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+
+        ictChartData = data;
+        renderICTChart(data);
+    } catch (err) {
+        console.error("ICT Chart hatası:", err);
+        document.getElementById("ictChartLoading").style.display = "none";
+        document.getElementById("ictChartContainer").innerHTML =
+            `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--red)">
+                <i class="fas fa-exclamation-triangle" style="margin-right:8px"></i> Grafik yüklenemedi: ${err.message}
+            </div>`;
+    }
+}
+
+function renderICTChart(data) {
+    const container = document.getElementById("ictChartContainer");
+    container.innerHTML = "";
+
+    // Chart oluştur
+    ictChart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: container.clientHeight,
+        layout: {
+            background: { type: "solid", color: "#0d1117" },
+            textColor: "#8b949e",
+            fontFamily: "'Inter', sans-serif",
+            fontSize: 11
+        },
+        grid: {
+            vertLines: { color: "rgba(139,148,158,0.06)" },
+            horzLines: { color: "rgba(139,148,158,0.06)" }
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { color: "rgba(139,148,158,0.3)", style: 3, width: 1 },
+            horzLine: { color: "rgba(139,148,158,0.3)", style: 3, width: 1 }
+        },
+        rightPriceScale: {
+            borderColor: "rgba(139,148,158,0.15)",
+            scaleMargins: { top: 0.1, bottom: 0.2 }
+        },
+        timeScale: {
+            borderColor: "rgba(139,148,158,0.15)",
+            timeVisible: true,
+            secondsVisible: false,
+            barSpacing: 8
+        },
+        handleScroll: { vertTouchDrag: false },
+        handleScale: { axisPressedMouseMove: true }
+    });
+
+    // Candlestick serisi
+    ictCandleSeries = ictChart.addCandlestickSeries({
+        upColor: "#00d4aa",
+        downColor: "#ff4757",
+        borderUpColor: "#00d4aa",
+        borderDownColor: "#ff4757",
+        wickUpColor: "#00d4aa",
+        wickDownColor: "#ff4757"
+    });
+    ictCandleSeries.setData(data.candles);
+
+    // Volume serisi
+    ictVolumeSeries = ictChart.addHistogramSeries({
+        priceFormat: { type: "volume" },
+        priceScaleId: "volume",
+        scaleMargins: { top: 0.85, bottom: 0 }
+    });
+    ictChart.priceScale("volume").applyOptions({
+        scaleMargins: { top: 0.85, bottom: 0 }
+    });
+    const volData = data.candles.map(c => ({
+        time: c.time,
+        value: c.volume,
+        color: c.close >= c.open ? "rgba(0,212,170,0.15)" : "rgba(255,71,87,0.15)"
+    }));
+    ictVolumeSeries.setData(volData);
+
+    // ICT katmanlarını çiz
+    drawICTLayers(data);
+
+    // Footer info güncelle
+    updateICTFooter(data);
+
+    // Header bias
+    const biasEl = document.getElementById("ictChartBias");
+    if (data.htf_bias) {
+        biasEl.textContent = data.htf_bias;
+        biasEl.className = "ict-chart-bias " + (data.htf_bias === "LONG" ? "bias-long" : "bias-short");
+    } else {
+        biasEl.textContent = "NEUTRAL";
+        biasEl.className = "ict-chart-bias";
+    }
+
+    // Loading gizle
+    document.getElementById("ictChartLoading").style.display = "none";
+
+    // Resize observer
+    const ro = new ResizeObserver(() => {
+        if (ictChart) ictChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+    });
+    ro.observe(container);
+
+    // Toggle checkbox listeners
+    setupICTToggleListeners();
+
+    // Son 50 muma zoom yap
+    if (data.candles.length > 50) {
+        const from = data.candles[data.candles.length - 50].time;
+        const to = data.candles[data.candles.length - 1].time;
+        ictChart.timeScale().setVisibleRange({ from, to });
+    }
+}
+
+function drawICTLayers(data) {
+    if (!ictCandleSeries || !ictChart) return;
+
+    const markers = [];
+
+    // 1) FVG bölgeleri (mor dikdörtgenler → area series trick)
+    if (document.getElementById("toggleFVG").checked && data.fvgs && data.fvgs.length > 0) {
+        data.fvgs.forEach((fvg, i) => {
+            const isBullish = fvg.type === "BULLISH";
+            const color = isBullish ? "rgba(155,89,182,0.20)" : "rgba(231,76,60,0.20)";
+            const borderColor = isBullish ? "rgba(155,89,182,0.60)" : "rgba(231,76,60,0.60)";
+
+            // FVG horizontal price line markers
+            ictCandleSeries.createPriceLine({
+                price: fvg.high,
+                color: borderColor,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dotted,
+                axisLabelVisible: false,
+                title: ""
+            });
+            ictCandleSeries.createPriceLine({
+                price: fvg.low,
+                color: borderColor,
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dotted,
+                axisLabelVisible: false,
+                title: ""
+            });
+
+            // FVG marker
+            markers.push({
+                time: fvg.time,
+                position: isBullish ? "belowBar" : "aboveBar",
+                color: isBullish ? "#9b59b6" : "#e74c3c",
+                shape: "square",
+                text: `FVG ${isBullish ? "▲" : "▼"}`
+            });
+        });
+    }
+
+    // 2) Order Blocks (mavi/turuncu dikdörtgenler)
+    if (document.getElementById("toggleOB").checked && data.order_blocks && data.order_blocks.length > 0) {
+        data.order_blocks.forEach((ob) => {
+            const isBullish = ob.type === "BULLISH";
+            const color = isBullish ? "rgba(52,152,219,0.50)" : "rgba(230,126,34,0.50)";
+            const label = isBullish ? "Bull OB" : "Bear OB";
+
+            ictCandleSeries.createPriceLine({
+                price: ob.high,
+                color: color,
+                lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                axisLabelVisible: false,
+                title: ""
+            });
+            ictCandleSeries.createPriceLine({
+                price: ob.low,
+                color: color,
+                lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                axisLabelVisible: false,
+                title: ""
+            });
+
+            markers.push({
+                time: ob.time,
+                position: isBullish ? "belowBar" : "aboveBar",
+                color: isBullish ? "#3498db" : "#e67e22",
+                shape: "square",
+                text: label
+            });
+        });
+    }
+
+    // 3) BOS events
+    if (document.getElementById("toggleBOS").checked && data.bos_events && data.bos_events.length > 0) {
+        data.bos_events.forEach(bos => {
+            const isBullish = bos.type.includes("BULLISH");
+            markers.push({
+                time: bos.time,
+                position: isBullish ? "aboveBar" : "belowBar",
+                color: isBullish ? "#2ecc71" : "#e74c3c",
+                shape: "arrowUp",
+                text: "BOS"
+            });
+
+            ictCandleSeries.createPriceLine({
+                price: bos.price,
+                color: isBullish ? "rgba(46,204,113,0.5)" : "rgba(231,76,60,0.5)",
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: false,
+                title: "BOS"
+            });
+        });
+    }
+
+    // 4) CHoCH events
+    if (document.getElementById("toggleCHoCH").checked && data.choch_events && data.choch_events.length > 0) {
+        data.choch_events.forEach(ch => {
+            const isBullish = ch.type.includes("BULLISH");
+            markers.push({
+                time: ch.time,
+                position: isBullish ? "aboveBar" : "belowBar",
+                color: "#f1c40f",
+                shape: "circle",
+                text: "CHoCH"
+            });
+
+            ictCandleSeries.createPriceLine({
+                price: ch.price,
+                color: "rgba(241,196,15,0.6)",
+                lineWidth: 2,
+                lineStyle: LightweightCharts.LineStyle.SparseDotted,
+                axisLabelVisible: false,
+                title: "CHoCH"
+            });
+        });
+    }
+
+    // 5) Sweep event
+    if (document.getElementById("toggleSweep").checked && data.sweep) {
+        const sw = data.sweep;
+        markers.push({
+            time: sw.time,
+            position: sw.type === "SSL_SWEEP" ? "belowBar" : "aboveBar",
+            color: "#e74c3c",
+            shape: "arrowDown",
+            text: `🔥 ${sw.type === "SSL_SWEEP" ? "SSL" : "BSL"} Sweep`
+        });
+
+        ictCandleSeries.createPriceLine({
+            price: sw.swept_level,
+            color: "rgba(231,76,60,0.8)",
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: "Sweep Level"
+        });
+    }
+
+    // 6) Premium/Discount zones
+    if (document.getElementById("togglePD").checked && data.premium_discount) {
+        const pd = data.premium_discount;
+
+        // Equilibrium line
+        ictCandleSeries.createPriceLine({
+            price: pd.equilibrium,
+            color: "rgba(149,165,166,0.7)",
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.LargeDashed,
+            axisLabelVisible: true,
+            title: "EQ"
+        });
+
+        // OTE zone lines
+        if (pd.ote_high && pd.ote_low) {
+            ictCandleSeries.createPriceLine({
+                price: pd.ote_high,
+                color: "rgba(155,89,182,0.5)",
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dotted,
+                axisLabelVisible: false,
+                title: "OTE H"
+            });
+            ictCandleSeries.createPriceLine({
+                price: pd.ote_low,
+                color: "rgba(155,89,182,0.5)",
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dotted,
+                axisLabelVisible: false,
+                title: "OTE L"
+            });
+        }
+
+        // Premium/Discount background lines
+        ictCandleSeries.createPriceLine({
+            price: pd.high,
+            color: "rgba(231,76,60,0.3)",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            axisLabelVisible: false,
+            title: "Premium"
+        });
+        ictCandleSeries.createPriceLine({
+            price: pd.low,
+            color: "rgba(46,204,113,0.3)",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dotted,
+            axisLabelVisible: false,
+            title: "Discount"
+        });
+    }
+
+    // 7) Swing Highs/Lows
+    if (document.getElementById("toggleSwing").checked) {
+        if (data.swing_highs) {
+            data.swing_highs.forEach(sh => {
+                markers.push({
+                    time: sh.time,
+                    position: "aboveBar",
+                    color: "rgba(189,195,199,0.7)",
+                    shape: "arrowDown",
+                    text: "HH"
+                });
+            });
+        }
+        if (data.swing_lows) {
+            data.swing_lows.forEach(sl => {
+                markers.push({
+                    time: sl.time,
+                    position: "belowBar",
+                    color: "rgba(189,195,199,0.7)",
+                    shape: "arrowUp",
+                    text: "LL"
+                });
+            });
+        }
+    }
+
+    // 8) Active signal lines (Entry / SL / TP)
+    if (document.getElementById("toggleSignal").checked && data.active_signal) {
+        const sig = data.active_signal;
+
+        ictCandleSeries.createPriceLine({
+            price: sig.entry,
+            color: "#00d4aa",
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `Entry (${sig.direction})`
+        });
+
+        ictCandleSeries.createPriceLine({
+            price: sig.sl,
+            color: "#ff4757",
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: "Stop Loss"
+        });
+
+        ictCandleSeries.createPriceLine({
+            price: sig.tp,
+            color: "#3498db",
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: "Take Profit"
+        });
+    }
+
+    // 9) Liquidity levels
+    if (data.liquidity_levels && data.liquidity_levels.length > 0) {
+        data.liquidity_levels.forEach(liq => {
+            const isHighs = liq.type === "EQUAL_HIGHS";
+            ictCandleSeries.createPriceLine({
+                price: liq.price,
+                color: liq.swept ? "rgba(149,165,166,0.3)" : (isHighs ? "rgba(231,76,60,0.5)" : "rgba(46,204,113,0.5)"),
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.SparseDotted,
+                axisLabelVisible: false,
+                title: liq.swept ? `${liq.type} ✓` : `${liq.type} (${liq.touches}x)`
+            });
+        });
+    }
+
+    // 10) Breaker blocks
+    if (data.breaker_blocks && data.breaker_blocks.length > 0) {
+        data.breaker_blocks.forEach(bb => {
+            const isBullish = bb.type === "BULLISH";
+            ictCandleSeries.createPriceLine({
+                price: bb.high,
+                color: isBullish ? "rgba(26,188,156,0.4)" : "rgba(192,57,43,0.4)",
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                axisLabelVisible: false,
+                title: ""
+            });
+            ictCandleSeries.createPriceLine({
+                price: bb.low,
+                color: isBullish ? "rgba(26,188,156,0.4)" : "rgba(192,57,43,0.4)",
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Solid,
+                axisLabelVisible: false,
+                title: ""
+            });
+            markers.push({
+                time: bb.time,
+                position: isBullish ? "belowBar" : "aboveBar",
+                color: isBullish ? "#1abc9c" : "#c0392b",
+                shape: "diamond",
+                text: "BB"
+            });
+        });
+    }
+
+    // 11) Displacement candles
+    if (data.displacements && data.displacements.length > 0) {
+        data.displacements.forEach(d => {
+            markers.push({
+                time: d.time,
+                position: d.direction === "BULLISH" ? "belowBar" : "aboveBar",
+                color: "#f39c12",
+                shape: "circle",
+                text: "⚡"
+            });
+        });
+    }
+
+    // Marker'ları time sırasına göre sırala ve set et
+    if (markers.length > 0) {
+        markers.sort((a, b) => a.time - b.time);
+
+        // Aynı time+position'da birden fazla marker varsa sadece birini tut (önemli olanı)
+        const uniqueMarkers = [];
+        const seen = new Set();
+        for (const m of markers) {
+            const key = `${m.time}-${m.position}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                uniqueMarkers.push(m);
+            }
+        }
+        ictCandleSeries.setMarkers(uniqueMarkers);
+    }
+}
+
+function updateICTFooter(data) {
+    document.getElementById("ictInfoTrend").textContent = data.ltf_trend || "---";
+    document.getElementById("ictInfoBias").textContent = data.htf_bias || "---";
+    document.getElementById("ictInfoFVG").textContent = data.fvgs ? data.fvgs.length : 0;
+    document.getElementById("ictInfoOB").textContent = data.order_blocks ? data.order_blocks.length : 0;
+    document.getElementById("ictInfoSweep").textContent = data.sweep ? data.sweep.type : "Yok";
+
+    const zone = data.premium_discount ? data.premium_discount.zone : "---";
+    const zoneEl = document.getElementById("ictInfoZone");
+    zoneEl.textContent = zone;
+    zoneEl.style.color = zone === "PREMIUM" ? "var(--red)" : zone === "DISCOUNT" ? "var(--green)" : "var(--text-secondary)";
+
+    const trendEl = document.getElementById("ictInfoTrend");
+    const trend = data.ltf_trend || "";
+    trendEl.style.color = trend.includes("BULL") ? "var(--green)" : trend.includes("BEAR") ? "var(--red)" : "var(--text-secondary)";
+
+    const biasEl = document.getElementById("ictInfoBias");
+    biasEl.style.color = data.htf_bias === "LONG" ? "var(--green)" : data.htf_bias === "SHORT" ? "var(--red)" : "var(--text-secondary)";
+}
+
+function setupICTToggleListeners() {
+    const toggleIds = ["toggleFVG", "toggleOB", "toggleBOS", "toggleCHoCH", "toggleSweep", "togglePD", "toggleSwing", "toggleSignal"];
+    toggleIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.onchange = () => {
+                if (ictChartData && ictCandleSeries) {
+                    // Price line'ları temizlemek için chart'ı yeniden çiz
+                    redrawICTChart();
+                }
+            };
+        }
+    });
+}
+
+function redrawICTChart() {
+    if (!ictChartData || !ictChart) return;
+
+    // Mevcut visible range'i kaydet
+    const visibleRange = ictChart.timeScale().getVisibleRange();
+
+    // Chart'ı tamamen yeniden render et
+    const container = document.getElementById("ictChartContainer");
+    ictChart.remove();
+    ictChart = null;
+    ictExtraSeriesList = [];
+
+    renderICTChart(ictChartData);
+
+    // Önceki zoom seviyesini geri yükle
+    if (visibleRange) {
+        setTimeout(() => {
+            if (ictChart) ictChart.timeScale().setVisibleRange(visibleRange);
+        }, 50);
+    }
+}
+
+// Escape tuşu ile kapat
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+        const overlay = document.getElementById("ictChartOverlay");
+        if (overlay && overlay.classList.contains("active")) {
+            closeICTChart(e);
+        }
+    }
+});

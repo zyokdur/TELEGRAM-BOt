@@ -8,6 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 
@@ -1194,6 +1195,48 @@
             </div>
 
         </main>
+    </div>
+
+    <!-- ICT CHART MODAL -->
+    <div class="ict-chart-overlay" id="ictChartOverlay" onclick="closeICTChart(event)">
+        <div class="ict-chart-modal" onclick="event.stopPropagation()">
+            <div class="ict-chart-header">
+                <div class="ict-chart-title">
+                    <i class="fas fa-chart-candlestick"></i>
+                    <span id="ictChartSymbol">---</span>
+                    <span class="ict-chart-tf">15m</span>
+                    <span class="ict-chart-bias" id="ictChartBias">---</span>
+                </div>
+                <div class="ict-chart-legend" id="ictChartLegend">
+                    <label class="legend-toggle"><input type="checkbox" id="toggleFVG" checked><span class="legend-color" style="background:rgba(155,89,182,0.4)"></span>FVG</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleOB" checked><span class="legend-color" style="background:rgba(52,152,219,0.4)"></span>OB</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleBOS" checked><span class="legend-color" style="background:rgba(46,204,113,0.5)"></span>BOS</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleCHoCH" checked><span class="legend-color" style="background:rgba(241,196,15,0.5)"></span>CHoCH</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleSweep" checked><span class="legend-color" style="background:rgba(231,76,60,0.6)"></span>Sweep</label>
+                    <label class="legend-toggle"><input type="checkbox" id="togglePD" checked><span class="legend-color" style="background:rgba(149,165,166,0.2)"></span>P/D</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleSwing" checked><span class="legend-color" style="background:rgba(189,195,199,0.6)"></span>Swing</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleSignal" checked><span class="legend-color" style="background:rgba(0,255,127,0.6)"></span>Sinyal</label>
+                </div>
+                <button class="ict-chart-close" onclick="closeICTChart(event)">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="ict-chart-body">
+                <div id="ictChartContainer" style="width:100%;height:100%;"></div>
+                <div class="ict-chart-loading" id="ictChartLoading">
+                    <div class="spinner"></div>
+                    <span>ICT Analiz yükleniyor...</span>
+                </div>
+            </div>
+            <div class="ict-chart-footer" id="ictChartFooter">
+                <div class="ict-info-item"><span class="ict-info-label">Trend:</span> <span id="ictInfoTrend">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Bias:</span> <span id="ictInfoBias">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">FVG:</span> <span id="ictInfoFVG">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">OB:</span> <span id="ictInfoOB">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Sweep:</span> <span id="ictInfoSweep">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Zone:</span> <span id="ictInfoZone">---</span></div>
+            </div>
+        </div>
     </div>
 
     <!-- TOAST CONTAINER -->
