@@ -596,52 +596,88 @@ class TradeManager:
 
             candles_watched += 1
 
-            # === 5m Onay Analizi (basitleştirilmiş) ===
-            # 5m veride tam ICT analizi yapmak yerine, yön uyumu ve fiyat
-            # hareketi kontrol edilir. Çünkü ICT yapıları (FVG, OB vb.)
-            # 15m'de tespit edilmiştir — 5m'de aynı yapıları aramak anlamsız.
+            # === 5m Onay Analizi (geliştirilmiş v2) ===
+            # 15m'de tespit edilen ICT yapılarının (FVG, OB, sweep) gerçekten
+            # devam edip etmediğini 5m mumlarıyla doğrular. 6 kriter:
             
-            # 1) Yön kontrolü: 5m yapısal trend
-            structure_5m = strategy_engine.detect_market_structure(watch_df)
-            trend_5m = structure_5m.get("trend", "NEUTRAL")
-            
-            if expected_direction == "LONG":
-                direction_ok = trend_5m in ["BULLISH", "WEAKENING_BEAR", "NEUTRAL"]
-            else:
-                direction_ok = trend_5m in ["BEARISH", "WEAKENING_BULL", "NEUTRAL"]
-            
-            # 2) Ranging kontrolü
-            market_ok = not strategy_engine.detect_ranging_market(watch_df)
-            
-            # 3) Fiyat hareketi kontrolü: Son mum yöne uygun mu?
             last_candle = watch_df.iloc[-1]
-            if expected_direction == "LONG":
-                price_ok = last_candle["close"] >= last_candle["open"]  # Yeşil mum
-            else:
-                price_ok = last_candle["close"] <= last_candle["open"]  # Kırmızı mum
-            
-            # 4) Potansiyel entry hâlâ geçerli mi?
             potential_entry = item.get("potential_entry", 0)
             potential_sl = item.get("potential_sl", 0)
             current_5m_price = last_candle["close"]
             
+            # ── 1) Yön kontrolü: 5m yapısal trend (NEUTRAL artık geçmez) ──
+            structure_5m = strategy_engine.detect_market_structure(watch_df)
+            trend_5m = structure_5m.get("trend", "NEUTRAL")
+            
+            if expected_direction == "LONG":
+                direction_ok = trend_5m in ["BULLISH", "WEAKENING_BEAR"]
+            else:
+                direction_ok = trend_5m in ["BEARISH", "WEAKENING_BULL"]
+            
+            # ── 2) Ranging kontrolü ──
+            market_ok = not strategy_engine.detect_ranging_market(watch_df)
+            
+            # ── 3) Mum gövde filtresi: doji/küçük mumları reddet ──
+            candle_body = abs(last_candle["close"] - last_candle["open"])
+            recent_bodies = watch_df.tail(20).apply(
+                lambda r: abs(r["close"] - r["open"]), axis=1
+            )
+            avg_body = recent_bodies.mean() if len(recent_bodies) > 0 else 0
+            # Gövde, son 20 mumun ortalamasının min %30'u olmalı
+            body_ok = candle_body >= avg_body * 0.3 if avg_body > 0 else True
+            
+            # Mum yönü doğru mu?
+            if expected_direction == "LONG":
+                price_ok = last_candle["close"] > last_candle["open"]  # Kesin yeşil (= dahil değil)
+            else:
+                price_ok = last_candle["close"] < last_candle["open"]  # Kesin kırmızı
+            
+            # ── 4) Hacim doğrulaması: zayıf hacimli mumları reddet ──
+            vol_series = watch_df.tail(20)["volume"]
+            avg_vol = vol_series.mean() if len(vol_series) > 0 else 0
+            current_vol = last_candle.get("volume", 0)
+            # Hacim, ortalamanın en az %80'i olmalı
+            volume_ok = current_vol >= avg_vol * 0.8 if avg_vol > 0 else True
+            
+            # ── 5) Entry bölgesi mesafe kontrolü ──
+            # Fiyat, potansiyel entry'den max %2 uzakta olmalı
+            entry_distance_pct = 0.0
+            if potential_entry > 0:
+                entry_distance_pct = abs(current_5m_price - potential_entry) / potential_entry * 100
+                entry_near_ok = entry_distance_pct <= 2.0
+            else:
+                entry_near_ok = True
+            
+            # ── 6) SL seviyesi koruması ──
             if expected_direction == "LONG":
                 level_ok = current_5m_price > potential_sl if potential_sl > 0 else True
             else:
                 level_ok = current_5m_price < potential_sl if potential_sl > 0 else True
             
-            # Basit skor: Başlangıç skorunun yönsel korunması
-            new_score = item["initial_score"]  # Değişmediğini varsay
+            # ── Skor hesaplama ──
+            new_score = item["initial_score"]
             if not direction_ok:
                 new_score *= 0.3
             if not market_ok:
                 new_score *= 0.5
+            if not volume_ok:
+                new_score *= 0.7
+            if not entry_near_ok:
+                new_score *= 0.6
             
-            # Onay kriterleri (basitleştirilmiş)
+            # ── Onay kararı ──
+            # Zorunlu: level_ok (SL ihlali → zaten erken expire)
+            # Zorunlu: body_ok (doji geçmesin)
+            # Zorunlu: entry_near_ok (fiyat entry'den çok uzaklaşmışsa onaylama)
+            # Esnek: direction_ok VEYA (price_ok VE volume_ok)
+            #   → Trend uyumluysa direkt onay
+            #   → Trend NEUTRAL ama güçlü mum + yüksek hacim varsa yine onay
             candle_confirmed = all([
-                direction_ok,
-                market_ok or price_ok,  # İkisinden biri yeterli
                 level_ok,
+                body_ok,
+                entry_near_ok,
+                market_ok or price_ok,
+                direction_ok or (price_ok and volume_ok),
             ])
             if candle_confirmed:
                 confirmation_count += 1
@@ -651,6 +687,9 @@ class TradeManager:
                 f"yön={'✓' if direction_ok else '✗'}({trend_5m}) "
                 f"market={'✓' if market_ok else '✗'} "
                 f"price={'✓' if price_ok else '✗'} "
+                f"body={'✓' if body_ok else '✗'} "
+                f"vol={'✓' if volume_ok else '✗'} "
+                f"entry={'✓' if entry_near_ok else '✗'}({entry_distance_pct:.1f}%) "
                 f"level={'✓' if level_ok else '✗'} "
                 f"onay={confirmation_count}/{candles_watched}"
             )

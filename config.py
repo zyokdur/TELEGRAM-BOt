@@ -92,8 +92,10 @@ QPA_SCAN_ENABLED = True     # QPA stratejisi aktif mi?
 
 # İzleme Onay Akışı (zorunlu)
 WATCH_CONFIRM_TIMEFRAME = "5m"          # İzleme zaman dilimi
-WATCH_CONFIRM_CANDLES = 2               # Kaç mum kapanışı izlenecek (2 mum → 2 şans verir)
+WATCH_CONFIRM_CANDLES = 2               # Kaç mum kapanışı izlenecek
 WATCH_REQUIRED_CONFIRMATIONS = 1        # 2 mum içinde 1 onay yeterli
+# v2 kriterler: NEUTRAL trend → otomatik onay değil, mum gövde filtresi,
+# hacim doğrulaması (%80 ort.), entry mesafe kontrolü (max %2)
 
 # Web Server
 HOST = "0.0.0.0"
