@@ -226,11 +226,15 @@ class TradeManager:
                 logger.debug(f"⏭️ {signal['symbol']} zaten aktif/bekleyen işlemde, izlemeye alınmadı")
                 return None
 
-        # Aynı coinde zaten izleme varsa tekrar ekleme (log spam engeli)
+        # Aynı coinde zaten izleme varsa (herhangi bir yönde) tekrar ekleme
+        # Hem aynı yön hem ters yön koruması: Aynı coin için çift sinyal engeli
         watching_items = get_watching_items()
         for w in watching_items:
-            if w["symbol"] == signal["symbol"] and w["direction"] == signal["direction"]:
-                logger.debug(f"⏭️ {signal['symbol']} zaten izleme listesinde, atlanıyor")
+            if w["symbol"] == signal["symbol"]:
+                if w["direction"] == signal["direction"]:
+                    logger.debug(f"⏭️ {signal['symbol']} {signal['direction']} zaten izleme listesinde, atlanıyor")
+                else:
+                    logger.debug(f"⏭️ {signal['symbol']} ters yön ({w['direction']}) izlemede, {signal['direction']} atlanıyor")
                 return {"status": "ALREADY_WATCHING", "watch_id": w["id"], "symbol": signal["symbol"]}
 
         watch_candles = WATCH_CONFIRM_CANDLES

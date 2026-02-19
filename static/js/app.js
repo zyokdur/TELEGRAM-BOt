@@ -555,7 +555,10 @@ async function loadHistory() {
     document.getElementById("histWins").textContent = wins;
     document.getElementById("histLosses").textContent = losses;
 
-    if (data.length === 0) {
+    // Sadece tamamlanmış işlemleri göster (backend zaten filtreli döndürüyor, ek güvenlik)
+    const historyItems = data.filter(s => ["WON", "LOST", "CANCELLED"].includes(s.status));
+
+    if (historyItems.length === 0) {
         tbody.innerHTML = `
             <tr class="empty-row"><td colspan="11">
                 <div class="empty-state">
@@ -567,7 +570,7 @@ async function loadHistory() {
         return;
     }
 
-    tbody.innerHTML = data.map(s => {
+    tbody.innerHTML = historyItems.map(s => {
         const dirBadge = s.direction === "LONG"
             ? '<span class="badge badge-long"><i class="fas fa-arrow-up"></i> LONG</span>'
             : '<span class="badge badge-short"><i class="fas fa-arrow-down"></i> SHORT</span>';
@@ -583,11 +586,6 @@ async function loadHistory() {
             case "CANCELLED":
                 statusBadge = '<span class="badge badge-cancelled"><i class="fas fa-ban"></i> İptal</span>';
                 break;
-            case "ACTIVE":
-                statusBadge = '<span class="badge badge-active"><i class="fas fa-bolt"></i> Aktif</span>';
-                break;
-            default:
-                statusBadge = `<span class="badge badge-waiting">${s.status}</span>`;
         }
 
         const pnl = s.pnl_pct || 0;

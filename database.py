@@ -391,7 +391,8 @@ def get_active_signals():
 
 def get_signal_history(limit=50):
     return _fetchall("""
-        SELECT * FROM signals ORDER BY created_at DESC LIMIT ?
+        SELECT * FROM signals WHERE status IN ('WON', 'LOST', 'CANCELLED')
+        ORDER BY close_time DESC, created_at DESC LIMIT ?
     """, (limit,))
 
 
