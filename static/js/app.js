@@ -1954,6 +1954,13 @@ function renderForexCard(r) {
         biasIndicator = `<span class="fx-card-bias ${biasCls}"><i class="fas fa-compass"></i> HTF: ${r.daily_bias.bias === "BULLISH" ? "Yükseliş" : "Düşüş"}</span>`;
     }
 
+    // Yorum özeti (kart altında kısa yorum)
+    let commentarySummary = "";
+    if (r.commentary && r.commentary.summary) {
+        const sum = r.commentary.summary.length > 160 ? r.commentary.summary.substring(0, 157) + "..." : r.commentary.summary;
+        commentarySummary = `<div class="fx-card-commentary"><i class="fas fa-brain"></i> ${sum}</div>`;
+    }
+
     return `
     <div class="fx-card signal-${r.signal}" onclick="openForexDetail('${r.instrument}')">
         <div class="fx-card-header">
@@ -1977,6 +1984,7 @@ function renderForexCard(r) {
             </div>
             <div class="fx-card-tags">${tags.join("")}</div>
             ${slTpMini}
+            ${commentarySummary}
         </div>
 
         <div class="fx-card-bottom">
@@ -2038,6 +2046,39 @@ async function openForexDetail(instrument) {
     document.getElementById("fxScoreBull").style.width = `${data.bull_score / totalScore * 100}%`;
     document.getElementById("fxScoreBearVal").textContent = data.bear_score;
     document.getElementById("fxScoreBullVal").textContent = data.bull_score;
+
+    // ICT Teknik Yorum
+    const commentaryEl = document.getElementById("fxCommentary");
+    const commentarySection = document.getElementById("fxCommentarySection");
+    if (data.commentary && data.commentary.sections && data.commentary.sections.length > 0) {
+        commentarySection.style.display = "block";
+        let comHtml = "";
+        for (const sec of data.commentary.sections) {
+            const isConclusion = sec.title.includes("Sonuc") || sec.title.includes("Oneri");
+            const iconMap = {
+                "Genel Bakis": "fa-binoculars",
+                "Piyasa Yapisi": "fa-sitemap",
+                "Emir Bloklari (OB)": "fa-cubes",
+                "Adil Deger Bosluklari (FVG)": "fa-layer-group",
+                "Likidite Analizi": "fa-water",
+                "Momentum / Displacement": "fa-bolt-lightning",
+                "Premium/Indirim & OTE": "fa-percentage",
+                "Gunluk Yon & Ozel Paternler": "fa-compass",
+                "Seans & Zamanlama": "fa-clock",
+                "Teknik Gostergeler": "fa-gauge-high",
+                "Sonuc & Oneri": "fa-flag-checkered",
+            };
+            const icon = iconMap[sec.title] || "fa-circle-info";
+            comHtml += `
+                <div class="fx-com-block ${isConclusion ? 'conclusion' : ''}">
+                    <div class="fx-com-title"><i class="fas ${icon}"></i> ${sec.title}</div>
+                    <p class="fx-com-text">${sec.text}</p>
+                </div>`;
+        }
+        commentaryEl.innerHTML = comHtml;
+    } else {
+        commentarySection.style.display = "none";
+    }
 
     // SL / TP
     const slTpSection = document.getElementById("fxSlTpSection");

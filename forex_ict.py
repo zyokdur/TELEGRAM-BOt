@@ -1413,6 +1413,17 @@ class ForexICTEngine:
             sl_tp = {"sl": sl, "tp1": tp1, "tp2": tp2, "direction": "SHORT",
                      "rr1": rr1, "rr2": rr2, "method": "swing+ATR"}
 
+        # ── ICT TEKNIK YORUM METNI ──
+        commentary = self._generate_commentary(
+            inst, cur_price, timeframe, signal, label, desc,
+            net_score, bull_score, bear_score,
+            confluence_count, reasons_bull, reasons_bear,
+            ms, obs, breakers, fvgs, active_fvgs, bull_fvg, bear_fvg, ce_bull, ce_bear,
+            displacements, sweeps, inducements, ote, pd_zone,
+            kill, silver_bullet, amd, judas, daily_bias, asian_bo, smt,
+            indicators, sl_tp
+        )
+
         return {
             "instrument": instrument_key,
             "name": inst["name"],
@@ -1424,6 +1435,7 @@ class ForexICTEngine:
             "signal": signal,
             "label": label,
             "description": desc,
+            "commentary": commentary,
             "net_score": net_score,
             "bull_score": bull_score,
             "bear_score": bear_score,
@@ -1455,6 +1467,325 @@ class ForexICTEngine:
             "smart_money_trap": smt,
             "indicators": indicators,
             "timestamp": datetime.now().isoformat(),
+        }
+
+    # ================================================================
+    #  ICT TEKNIK YORUM MOTORU
+    # ================================================================
+
+    def _generate_commentary(self, inst, price, tf, signal, label, desc,
+                             net_score, bull_score, bear_score,
+                             conf_count, reasons_bull, reasons_bear,
+                             ms, obs, breakers, fvgs, active_fvgs,
+                             bull_fvg, bear_fvg, ce_bull, ce_bear,
+                             displacements, sweeps, inducements, ote, pd_zone,
+                             kill, silver_bullet, amd, judas, daily_bias,
+                             asian_bo, smt, indicators, sl_tp):
+        """
+        Tum ICT verilerini yorumlayarak detayli Turkce teknik analiz metni uretir.
+        Her parametre icin ne anlama geldigini, fiyatin nereye gidebilecegini,
+        hangi seviyelerde ne beklendigini aciklar.
+        """
+        name = inst["name"]
+        cat = inst["category"]
+        fp = lambda v: f"{v:.5f}" if v < 10 else (f"{v:.4f}" if v < 100 else f"{v:.2f}")
+        paragraphs = []
+
+        # ── 1. GENEL BAKIS ──
+        trend_tr = {"BULLISH": "yukselis", "BEARISH": "dusus", "NEUTRAL": "notr/kararsiz"}
+        p1 = f"{name} su an {fp(price)} seviyesinde islem goruyor ({tf} zaman dilimi). "
+        p1 += f"ICT analizi {conf_count['bull']} boga ve {conf_count['bear']} ayi uyum noktasi tespit etti. "
+        p1 += f"Genel skor: Boga {bull_score} / Ayi {bear_score} (net: {'+' if net_score > 0 else ''}{net_score}). "
+        if signal != "WAIT":
+            p1 += f"Sonuc: {label} sinyali."
+        else:
+            p1 += "Henuz net bir sinyal olusmuyor, bekleme konumunda."
+        paragraphs.append(("Genel Bakis", p1))
+
+        # ── 2. PIYASA YAPISI ──
+        p2 = f"Piyasa yapisi: {trend_tr.get(ms['trend'], 'belirsiz')} trendde. "
+        if ms["trend"] == "BULLISH":
+            p2 += "Fiyat daha yuksek zirveler (HH) ve daha yuksek dipler (HL) olusturuyor — trend saglam gorunuyor. "
+        elif ms["trend"] == "BEARISH":
+            p2 += "Fiyat daha dusuk zirveler (LH) ve daha dusuk dipler (LL) yapiyor — satis baskisi hakim. "
+        else:
+            p2 += "Belirgin bir HH/HL veya LH/LL serisi yok — piyasa yatay veya gecis doneminde. "
+
+        if ms["bos"]:
+            last_bos = ms["bos"][-1]
+            bos_dir = "yukari" if "BULL" in last_bos["type"] else "asagi"
+            p2 += f"Son BOS (Break of Structure) {bos_dir} yonde {fp(last_bos['level'])} seviyesinde gerceklesti. "
+            if "BULL" in last_bos["type"]:
+                p2 += "Bu, boga tarafinin kontrolu ele aldigini gosteriyor. "
+            else:
+                p2 += "Bu, ayilarin yapi kirilimini saglad igini gosteriyor. "
+
+        if ms["choch"]:
+            choch_dir = "yukari" if "BULL" in ms["choch"]["type"] else "asagi"
+            p2 += f"ONEMLI: CHoCH (Character of Change) tespit edildi — trend {choch_dir} donusu sinyali! "
+            p2 += "Bu, piyasanin yon degistirdiginin guclu bir isaretcisidir. "
+        paragraphs.append(("Piyasa Yapisi", p2))
+
+        # ── 3. EMIR BLOKLARI (OB) ──
+        active_obs_list = [ob for ob in obs if not ob.get("mitigated", False)]
+        if active_obs_list:
+            p3 = f"{len(active_obs_list)} aktif Emir Blogu (OB) tespit edildi. "
+            bull_obs = [ob for ob in active_obs_list if ob["type"] == "BULLISH_OB"]
+            bear_obs = [ob for ob in active_obs_list if ob["type"] == "BEARISH_OB"]
+
+            if bull_obs:
+                nearest_bull_ob = bull_obs[-1]
+                p3 += f"Bullish OB: {fp(nearest_bull_ob['low'])} - {fp(nearest_bull_ob['high'])} bolgesi (guc: {nearest_bull_ob['strength']}x). "
+                if nearest_bull_ob["low"] <= price <= nearest_bull_ob["high"]:
+                    p3 += "Fiyat su an BU BLOGUN ICINDE — alis tepkisi beklenebilir. "
+                elif price > nearest_bull_ob["high"]:
+                    dist_pct = abs(price - nearest_bull_ob["high"]) / price * 100
+                    p3 += f"Fiyat blogun {dist_pct:.2f}% uzerinde; geri cekilirse bu bolge destek olabilir. "
+                else:
+                    p3 += f"Fiyat blogun altinda — bloga ulasirsa guclu alis tepkisi beklenir. "
+
+            if bear_obs:
+                nearest_bear_ob = bear_obs[-1]
+                p3 += f"Bearish OB: {fp(nearest_bear_ob['low'])} - {fp(nearest_bear_ob['high'])} bolgesi (guc: {nearest_bear_ob['strength']}x). "
+                if nearest_bear_ob["low"] <= price <= nearest_bear_ob["high"]:
+                    p3 += "Fiyat su an BU BLOGUN ICINDE — satis baskisi beklenebilir. "
+                elif price < nearest_bear_ob["low"]:
+                    dist_pct = abs(nearest_bear_ob["low"] - price) / price * 100
+                    p3 += f"Fiyat blogun {dist_pct:.2f}% altinda; yukselirse bu bolge direnc olabilir. "
+        else:
+            p3 = "Aktif Emir Blogu (OB) tespit edilemedi. "
+            p3 += "Bu, piyasanin guclu bir kurumsal emirsiz bolgede oldugunu gosterebilir. "
+        paragraphs.append(("Emir Bloklari (OB)", p3))
+
+        # ── 4. FVG (Fair Value Gaps) ──
+        if active_fvgs:
+            p4 = f"{len(bull_fvg)} yukselis ve {len(bear_fvg)} dusus FVG tespit edildi. "
+            if ce_bull:
+                p4 += f"{len(ce_bull)} Bullish FVG'nin CE seviyesi (orta noktasi) test edildi — bu FVG'ler daha guclu tepki verebilir. "
+            if ce_bear:
+                p4 += f"{len(ce_bear)} Bearish FVG'nin CE seviyesi test edildi. "
+
+            # En yakin FVG'yi bul
+            nearest_fvg = None
+            min_dist = float('inf')
+            for fvg in active_fvgs[:6]:
+                mid = (fvg["top"] + fvg["bottom"]) / 2
+                dist = abs(price - mid)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_fvg = fvg
+
+            if nearest_fvg:
+                fvg_dir = "Yukaris" if "BULL" in nearest_fvg["type"] else "Asagi"
+                ce = nearest_fvg["ce_level"]
+                p4 += f"En yakin FVG: {fvg_dir} — {fp(nearest_fvg['bottom'])} ile {fp(nearest_fvg['top'])} arasi. "
+                p4 += f"CE (Consequent Encroachment) seviyesi: {fp(ce)}. "
+                if nearest_fvg["bottom"] <= price <= nearest_fvg["top"]:
+                    p4 += "Fiyat su an bu FVG icinde — boslugun doldurulmasi devam ediyor. "
+                elif "BULL" in nearest_fvg["type"] and price > nearest_fvg["top"]:
+                    p4 += f"Fiyat FVG'nin uzerinde; geri cekilirse {fp(nearest_fvg['top'])} - {fp(ce)} arasi destek bolgesi olabilir. "
+                elif "BEAR" in nearest_fvg["type"] and price < nearest_fvg["bottom"]:
+                    p4 += f"Fiyat FVG'nin altinda; yukselirse {fp(nearest_fvg['bottom'])} - {fp(ce)} arasi direnc bolgesi olabilir. "
+        else:
+            p4 = "Aktif FVG (fiyat boslugu) tespit edilemedi. Piyasa dengeli fiyatlamayla hareket ediyor. "
+        paragraphs.append(("Adil Deger Bosluklari (FVG)", p4))
+
+        # ── 5. LIKIDITE SUPURME ──
+        if sweeps:
+            p5 = f"Son {len(sweeps)} likidite supurme hareketi tespit edildi. "
+            last_sweep = sweeps[-1]
+            if last_sweep["type"] == "SELL_SIDE_SWEEP":
+                p5 += f"Son hareket: Ust likidite supuruldu (EQH) — {fp(last_sweep['sweep_price'])} seviyesine kadar cikip geri dondu. "
+                p5 += f"Esit zirve seviyesi {fp(last_sweep['level'])} idi. "
+                p5 += "Bu, kurumsallarin yukaridaki stop-loss'lari supurdugunu ve dusus yonu icin pozisyon aldigini gosterebilir. "
+                p5 += f"Fiyat {fp(last_sweep['level'])} altinda kalirsa dusus devam edebilir. "
+            else:
+                p5 += f"Son hareket: Alt likidite supuruldu (EQL) — {fp(last_sweep['sweep_price'])} seviyesine kadar inip geri dondu. "
+                p5 += f"Esit dip seviyesi {fp(last_sweep['level'])} idi. "
+                p5 += "Bu, kurumsallarin asagidaki stop-loss'lari supurdugunu ve yukselis yonu icin pozisyon aldigini gosterebilir. "
+                p5 += f"Fiyat {fp(last_sweep['level'])} uzerinde kalirsa yukselis devam edebilir. "
+        else:
+            p5 = "Yakin zamanda belirgin bir likidite supurme hareketi tespit edilemedi. "
+        paragraphs.append(("Likidite Analizi", p5))
+
+        # ── 6. DISPLACEMENT (Momentum) ──
+        if displacements:
+            p6 = f"{len(displacements)} displacement (guclu momentum) mumu tespit edildi. "
+            last_disp = displacements[-1]
+            disp_dir = "yukari" if "BULL" in last_disp["type"] else "asagi"
+            p6 += f"Son displacement {disp_dir} yonde, ortalama govdenin {last_disp['body_mult']}x buyuklugunde. "
+            p6 += f"Govde/fitil orani: %{int(last_disp['body_ratio'] * 100)} — "
+            if last_disp["body_ratio"] > 0.85:
+                p6 += "cok guclu momentum, kurumsal taraf agresif pozisyon aliyor. "
+            elif last_disp["body_ratio"] > 0.7:
+                p6 += "belirgin momentum, trend yonunde islem mantiksiz degil. "
+            else:
+                p6 += "orta seviye momentum. "
+        else:
+            p6 = "Belirgin bir displacement (momentum patlamasi) mumu tespit edilemedi. Piyasa sakin hareket ediyor. "
+        paragraphs.append(("Momentum / Displacement", p6))
+
+        # ── 7. PREMIUM / DISCOUNT & OTE ──
+        p7 = f"Fiyat su an {pd_zone['zone']} bolgesinde (%{pd_zone['zone_pct']}). "
+        p7 += f"Swing araligi: {fp(pd_zone['range_low'])} - {fp(pd_zone['range_high'])} | Denge (Equilibrium): {fp(pd_zone['equilibrium'])}. "
+        if pd_zone["zone"] == "DISCOUNT":
+            p7 += "INDIRIM bolgesinde — alis firsatlari icin ideal. Fiyat gercek degerinin altinda islem goruyor. "
+        elif pd_zone["zone"] == "PREMIUM":
+            p7 += "PREMIUM bolgesinde — satis firsatlari icin ideal. Fiyat gercek degerinin uzerinde islem goruyor. "
+        else:
+            p7 += "Denge bolgesinde — ne premium ne indirim, net yonlendirme zayif. "
+
+        if ote:
+            ote_dir = "ALIS" if ote["direction"] == "LONG" else "SATIS"
+            p7 += f"OTE (Optimal Trade Entry): {ote_dir} yonu icin {fp(ote['ote_bottom'])} - {fp(ote['ote_top'])} arasi ideal giris bolgesi (Fib 0.618-0.786). "
+            if ote["ote_bottom"] <= price <= ote["ote_top"]:
+                p7 += "DIKKAT: Fiyat su an OTE bolgesinde — giris icin cok uygun bir konum! "
+        paragraphs.append(("Premium/Indirim & OTE", p7))
+
+        # ── 8. GUNLUK YON & OZEL PATERNLER ──
+        p8 = ""
+        if daily_bias and daily_bias.get("bias") != "NEUTRAL":
+            bias_tr = "yukselis" if daily_bias["bias"] == "BULLISH" else "dusus"
+            p8 += f"Gunluk bias: {bias_tr.upper()} — {daily_bias.get('desc', '')}. "
+            p8 += f"Ust zaman dilimi (HTF) fiyatin {bias_tr} yonunde ilerleyecegini destekliyor. "
+        else:
+            p8 += "Gunluk bias notr — HTF'den net bir yonlendirme yok. "
+
+        if amd:
+            amd_dir = "yukari" if amd.get("direction") == "LONG" else "asagi"
+            p8 += f"AMD (Accumulation-Manipulation-Distribution) paterni tespit edildi — {amd_dir} yonde dagitim bekleniyor. "
+            p8 += "Piyasa birikim ve manipulasyon asamalarini tamamlamis, gercek hareket baslamis olabilir. "
+
+        if judas:
+            judas_dir = "dusus" if "BEAR" in judas["type"] else "yukselis"
+            p8 += f"Judas Swing: {judas['desc']}. "
+            p8 += f"Kill Zone acilisindaki ilk hareket sahte idi — gercek yon {judas_dir}. "
+
+        if asian_bo:
+            if asian_bo["type"] == "BULLISH_BREAKOUT":
+                p8 += f"Asian Range ({fp(asian_bo['asian_low'])} - {fp(asian_bo['asian_high'])}) yukari kirildi. London seansinda yukselis devam edebilir. "
+            elif asian_bo["type"] == "BEARISH_BREAKOUT":
+                p8 += f"Asian Range ({fp(asian_bo['asian_low'])} - {fp(asian_bo['asian_high'])}) asagi kirildi. London seansinda dusus devam edebilir. "
+            else:
+                p8 += f"Fiyat henuz Asian Range ({fp(asian_bo['asian_low'])} - {fp(asian_bo['asian_high'])}) icinde — kirilim bekleniyor. "
+
+        if smt:
+            smt_dir = "yukselis" if smt["type"] == "BEAR_TRAP" else "dusus"
+            p8 += f"SMART MONEY TRAP tespit edildi: {smt['desc']}. Kurumsallar {smt_dir} yonunde tuzak kurmus olabilir. "
+
+        if not p8:
+            p8 = "Gunluk yon veya ozel ICT paterni tespit edilemedi. "
+        paragraphs.append(("Gunluk Yon & Ozel Paternler", p8))
+
+        # ── 9. SEANS & ZAMANLAMA ──
+        p9 = ""
+        if kill["is_kill_zone"]:
+            p9 += f"{kill['desc']}. "
+            p9 += "Kill Zone icinde olmak, islem acisindan yuksek onem tasiyor — volatilite ve likidite bu donemde zirvede. "
+        else:
+            p9 += f"{kill['desc']}. "
+            p9 += "Kill Zone disinda islem riski artar, yanlis sinyaller olusabilir. Ideal islem zamanini beklemek mantikli olabilir. "
+
+        if silver_bullet["is_active"]:
+            p9 += f"{silver_bullet['desc']}. Silver Bullet penceresinde FVG bazli girisler cok guclu olabilir. "
+
+        paragraphs.append(("Seans & Zamanlama", p9))
+
+        # ── 10. TEKNIK GOSTERGELER ──
+        p10 = f"RSI(14): {indicators['rsi']:.1f} — "
+        if indicators["rsi"] > 70:
+            p10 += "asiri alim bolgesinde, geri cekilme riski yuksek. "
+        elif indicators["rsi"] > 60:
+            p10 += "alim bolgesine yaklesiyor, dikkatli olunmali. "
+        elif indicators["rsi"] < 30:
+            p10 += "asiri satim bolgesinde, toparlanma beklentisi artabilir. "
+        elif indicators["rsi"] < 40:
+            p10 += "satim bolgesine yaklesiyor. "
+        else:
+            p10 += "notr bolgede. "
+
+        p10 += f"ATR(14): {fp(indicators['atr'])} (volatilite %{indicators['atr_pct']}). "
+        if float(indicators["atr_pct"]) > 1.5:
+            p10 += "Volatilite cok yuksek — genis stop loss kullanmak gerekebilir. "
+        elif float(indicators["atr_pct"]) > 0.8:
+            p10 += "Normal volatilite — standart risk yonetimi uygulanabilir. "
+        else:
+            p10 += "Dusuk volatilite — dar range'de islem, kirilim beklenebilir. "
+
+        ema_list = []
+        if indicators.get("ema20"): ema_list.append(("EMA20", indicators["ema20"]))
+        if indicators.get("ema50"): ema_list.append(("EMA50", indicators["ema50"]))
+        if indicators.get("ema200"): ema_list.append(("EMA200", indicators["ema200"]))
+        if ema_list:
+            above = [n for n, v in ema_list if price > v]
+            below = [n for n, v in ema_list if price <= v]
+            if above:
+                p10 += f"Fiyat {', '.join(above)} uzerinde. "
+            if below:
+                p10 += f"Fiyat {', '.join(below)} altinda. "
+            if len(above) == len(ema_list):
+                p10 += "Tum EMA'lar altinda — guclu boga kontrolu. "
+            elif len(below) == len(ema_list):
+                p10 += "Tum EMA'larin altinda — ayi hakim. "
+        paragraphs.append(("Teknik Gostergeler", p10))
+
+        # ── 11. SONUC & ONERI ──
+        p11 = ""
+        if signal in ("STRONG_LONG", "LONG"):
+            p11 += f"SONUC: {label} — {name} icin yukselis beklentisi hakim. "
+            p11 += f"{conf_count['bull']} ICT konsepti alis yonunu destekliyor. "
+            if sl_tp:
+                risk_pct = abs(price - sl_tp["sl"]) / price * 100
+                p11 += f"Onerilen giris: {fp(price)}, Stop Loss: {fp(sl_tp['sl'])} (risk %{risk_pct:.2f}), "
+                p11 += f"TP1: {fp(sl_tp['tp1'])} (R:R 1:{sl_tp['rr1']}), TP2: {fp(sl_tp['tp2'])} (R:R 1:{sl_tp['rr2']}). "
+            if pd_zone["zone"] == "DISCOUNT":
+                p11 += "Fiyatin indirim bolgesinde olmasi alis tezini destekliyor. "
+            if ote and ote["direction"] == "LONG":
+                p11 += "OTE bolgesinde olunmasi giris kalitesini artiriyor. "
+
+        elif signal in ("STRONG_SHORT", "SHORT"):
+            p11 += f"SONUC: {label} — {name} icin dusus beklentisi hakim. "
+            p11 += f"{conf_count['bear']} ICT konsepti satis yonunu destekliyor. "
+            if sl_tp:
+                risk_pct = abs(sl_tp["sl"] - price) / price * 100
+                p11 += f"Onerilen giris: {fp(price)}, Stop Loss: {fp(sl_tp['sl'])} (risk %{risk_pct:.2f}), "
+                p11 += f"TP1: {fp(sl_tp['tp1'])} (R:R 1:{sl_tp['rr1']}), TP2: {fp(sl_tp['tp2'])} (R:R 1:{sl_tp['rr2']}). "
+            if pd_zone["zone"] == "PREMIUM":
+                p11 += "Fiyatin premium bolgesinde olmasi satis tezini destekliyor. "
+            if ote and ote["direction"] == "SHORT":
+                p11 += "OTE bolgesinde olunmasi giris kalitesini artiriyor. "
+
+        else:
+            p11 += f"SONUC: BEKLE — {name} icin net bir ICT confluence olusmuyor. "
+            p11 += f"Boga: {conf_count['bull']} uyum, Ayi: {conf_count['bear']} uyum — karar icin yetersiz. "
+            p11 += "Kill Zone icinde guclu bir BOS, CHoCH veya displacement olusana kadar beklenmesi oneriliyor. "
+
+            # Beklenen senaryo
+            if bull_score > bear_score:
+                p11 += f"Hafif boga egilimi var (skor: +{net_score}). "
+                if active_fvgs:
+                    for fvg in active_fvgs[:2]:
+                        if "BULL" in fvg["type"]:
+                            p11 += f"Fiyat {fp(fvg['ce_level'])} CE seviyesine cekilirse alis firsati olusabilir. "
+                            break
+            elif bear_score > bull_score:
+                p11 += f"Hafif ayi egilimi var (skor: {net_score}). "
+                if active_fvgs:
+                    for fvg in active_fvgs[:2]:
+                        if "BEAR" in fvg["type"]:
+                            p11 += f"Fiyat {fp(fvg['ce_level'])} CE seviyesine yukselirse satis firsati olusabilir. "
+                            break
+
+        if kill["is_kill_zone"]:
+            p11 += "Kill Zone aktif — islem zamani uygun. "
+        else:
+            p11 += f"Kill Zone disinda — bir sonraki pencere icin beklenebilir ({kill.get('next_kz', '')}). "
+
+        paragraphs.append(("Sonuc & Oneri", p11))
+
+        return {
+            "sections": [{"title": t, "text": txt} for t, txt in paragraphs],
+            "summary": p11.strip(),
         }
 
     def scan_all(self, timeframe="1h"):
