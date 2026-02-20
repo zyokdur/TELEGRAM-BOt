@@ -125,6 +125,39 @@ class TradeManager:
           "LIMIT"  → Fiyat FVG bölgesinin dışında → WAITING (limit emir bekliyor)
           "PENDING"→ Potansiyel sinyal → MARKET gibi işle
         """
+        # ══ KALİTE KAPISI: Yapısal olmayan sinyalleri reddet ══
+        # "Potansiyel" entry/SL = _build_signal_dict'ten gelen, ICT gate'leri
+        # geçmemiş, sabit % SL'li zayıf sinyaller → bunlar trade olmamalı
+        entry_type = signal.get("entry_type", "")
+        sl_type = signal.get("sl_type", "")
+        quality_tier = signal.get("quality_tier", "?")
+        if "Potansiyel" in entry_type or "Tahmini" in sl_type:
+            logger.info(
+                f"⛔ {signal['symbol']} reddedildi: Yapısal entry/SL yok "
+                f"(entry_type={entry_type}, sl_type={sl_type}) → ICT gate'leri geçmemiş"
+            )
+            return {"status": "REJECTED", "reason": "Yapısal entry/SL yok — potansiyel sinyal"}
+
+        # ══ MİNİMUM SKOR KAPISI ══
+        min_confluence = int(self._param("min_confluence_score"))
+        min_confidence = int(self._param("min_confidence"))
+        score = signal.get("confluence_score", 0)
+        conf = signal.get("confidence", 0)
+        if score < min_confluence * 0.5 or conf < min_confidence * 0.5:
+            logger.info(
+                f"⛔ {signal['symbol']} reddedildi: Skor çok düşük "
+                f"(score={score} < {min_confluence * 0.5}, conf={conf}% < {min_confidence * 0.5}%)"
+            )
+            return {"status": "REJECTED", "reason": f"Skor yetersiz: {score}/{min_confluence}"}
+
+        # ══ TİER KAPISI: Bilinmeyen tier trade açamaz ══
+        if quality_tier not in ("A+", "A"):
+            logger.info(
+                f"⛔ {signal['symbol']} reddedildi: Tier={quality_tier} "
+                f"(sadece A+ ve A tier trade açabilir)"
+            )
+            return {"status": "REJECTED", "reason": f"Tier {quality_tier} trade açamaz"}
+
         # Max eşzamanlı işlem kontrolü
         max_concurrent = int(self._param("max_concurrent_trades"))
         active_count = get_active_trade_count()
@@ -240,9 +273,11 @@ class TradeManager:
 
     def _add_to_watch(self, signal):
         """İzleme listesine ekle (5m onay akışı)."""
-        # Çok düşük skorlu sinyalleri izlemeye bile alma (flip-flop engel)
-        if signal.get("confluence_score", 0) < 25:
-            logger.debug(f"⏭️ {signal['symbol']} skor çok düşük ({signal['confluence_score']}), izlemeye alınmadı")
+        # Minimum skor: min_confluence_score'un %40'ı (60 → 24, ama en az 30)
+        min_watch_score = max(30, int(self._param("min_confluence_score")) * 0.4)
+        score = signal.get("confluence_score", 0)
+        if score < min_watch_score:
+            logger.debug(f"⏭️ {signal['symbol']} skor çok düşük ({score} < {min_watch_score}), izlemeye alınmadı")
             return None
 
         # ===== DUPLICATE KORUMASI =====
@@ -737,24 +772,50 @@ class TradeManager:
                         signal_result = None
                     
                     if signal_result and signal_result.get("action") in ("SIGNAL", "WATCH"):
-                        # B-tier güvenlik: Sweep olmadan trade açma
                         quality_tier = signal_result.get("quality_tier", "?")
-                        if quality_tier == "B":
+                        
+                        # ══ TİER KAPISI: Sadece A+ ve A tier trade açabilir ══
+                        # B-tier (sweep yok) ve ? (gate'ler geçmemiş) reddedilir
+                        if quality_tier not in ("A+", "A"):
                             logger.info(
-                                f"⏭️ {symbol} B-tier sinyal → sweep yok, trade açılmadı. "
-                                f"5m onay geçti ama ICT kalitesi yetersiz."
+                                f"⏭️ {symbol} Tier-{quality_tier} → trade açılmadı. "
+                                f"5m onay geçti ama ICT kalitesi yetersiz "
+                                f"(sadece A+ ve A tier trade açar)."
                             )
                             expire_watchlist_item(
                                 item["id"],
-                                reason=f"B-tier sinyal — sweep eksik, trade açılmadı"
+                                reason=f"Tier-{quality_tier} — ICT gate'leri geçmemiş, trade açılmadı"
                             )
                             continue
+                        
+                        # ══ SKOR KAPISI: Promosyonda da minimum skor kontrolü ══
+                        promo_score = signal_result.get("confluence_score", 0)
+                        promo_conf = signal_result.get("confidence", 0)
+                        promo_min_score = min_confluence * 0.5  # En az %50'si
+                        if promo_score < promo_min_score:
+                            logger.info(
+                                f"⏭️ {symbol} skor yetersiz ({promo_score} < {promo_min_score}) → trade açılmadı"
+                            )
+                            expire_watchlist_item(
+                                item["id"],
+                                reason=f"Skor yetersiz: {promo_score}/{min_confluence}"
+                            )
+                            continue
+                        
                         promote_watchlist_item(item["id"])
                         # WATCH bile olsa, 5m onaydan geçtiği için işleme al
                         if signal_result.get("action") == "WATCH":
                             signal_result = dict(signal_result)
                             signal_result["action"] = "SIGNAL"
                         trade_result = self._open_trade(signal_result)
+                        
+                        # _open_trade reddettiyse promoted'a ekleme
+                        if trade_result.get("status") == "REJECTED":
+                            logger.info(
+                                f"⛔ {symbol} promote edildi ama trade reddedildi: {trade_result.get('reason')}"
+                            )
+                            continue
+                        
                         promoted.append({
                             "symbol": symbol,
                             "action": "PROMOTED",
@@ -762,6 +823,7 @@ class TradeManager:
                         })
                         logger.info(
                             f"⬆️ İZLEMEDEN SİNYALE: {symbol} | "
+                            f"Tier: {quality_tier} | Score: {promo_score} | "
                             f"Onay: {confirmation_count}/{candles_watched} | "
                             f"Mode: {signal_result.get('entry_mode', '?')}"
                         )

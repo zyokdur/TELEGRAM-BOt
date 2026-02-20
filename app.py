@@ -183,17 +183,12 @@ def check_trades():
 
 
 def run_optimizer():
-    """Otomatik optimizasyonu çalıştır (scan_lock ile korunur)"""
+    """Otomatik optimizasyonu çalıştır — scan_lock gerektirmez."""
     if not bot_state["running"]:
         return
 
-    # scan_lock al — tarama sırasında params değişmesin (race condition koruması)
-    if not scan_lock.acquire(blocking=False):
-        logger.debug("⏳ Optimizer: Tarama devam ediyor, sonraki döngüye erteleniyor")
-        return
-
     try:
-        # ICT Optimizer
+        # ICT Optimizer — DB okuma + param yazma, tarama ile çakışma riski yok
         result = self_optimizer.run_optimization()
         bot_state["last_optimization"] = datetime.now().isoformat()
 
@@ -204,8 +199,6 @@ def run_optimizer():
 
     except Exception as e:
         logger.error(f"Optimizasyon hatası: {e}")
-    finally:
-        scan_lock.release()
 
 
 # Scheduler - her start/stop döngüsünde yeniden oluşturulur
@@ -369,10 +362,12 @@ def api_optimization_summary():
 
 @app.route("/api/optimization/run", methods=["POST"])
 def api_run_optimization():
-    """Manuel optimizasyon tetikle (scan_lock beklemeli — max 10s)"""
-    acquired = scan_lock.acquire(blocking=True, timeout=10)
-    if not acquired:
-        return jsonify({"status": "BUSY", "reason": "Tarama 10s içinde tamamlanamadı, lütfen tekrar deneyin"}), 409
+    """Manuel optimizasyon tetikle — scan_lock BEKLEMEZ, ayrı thread'de çalışır."""
+    # Optimizer kendi başına scan_lock gerektirmez — sadece DB okuyan ve param yazan bir işlem.
+    # Tarama sırasında da güvenle çalışabilir çünkü:
+    #   - DB okuma: get_completed_signals, get_performance_summary → thread-safe SQLite
+    #   - Param yazma: save_bot_param → tek satır UPDATE, atomik
+    #   - reload_params: Sonraki taramada yeni params kullanılır
     try:
         result = self_optimizer.run_optimization()
         bot_state["last_optimization"] = datetime.now().isoformat()
@@ -386,8 +381,6 @@ def api_run_optimization():
     except Exception as e:
         logger.error(f"Manuel optimizasyon hatası: {e}")
         return jsonify({"status": "ERROR", "reason": str(e), "changes": []}), 500
-    finally:
-        scan_lock.release()
 
 
 @app.route("/api/signal/<int:signal_id>/cancel", methods=["POST"])
@@ -1999,10 +1992,32 @@ def api_coin_detail(symbol):
 
         # TF çelişki kontrolü — 4H ve 15m zıt yönde ise güveni düşür
         v_4h = tf_results["4H"].get("verdict", "NEUTRAL")
+        v_1h = tf_results["1H"].get("verdict", "NEUTRAL")
         v_15m = tf_results["15m"].get("verdict", "NEUTRAL")
         bull_set = {"STRONG_BULLISH", "BULLISH", "LEANING_BULLISH"}
         bear_set = {"STRONG_BEARISH", "BEARISH", "LEANING_BEARISH"}
         tf_conflict = (v_4h in bull_set and v_15m in bear_set) or (v_4h in bear_set and v_15m in bull_set)
+
+        # Ayrıca 4H-1H çelişkisi de kontrol et
+        tf_conflict_4h_1h = (v_4h in bull_set and v_1h in bear_set) or (v_4h in bear_set and v_1h in bull_set)
+
+        # ── Her TF'nin yön etiketini hazırla (açıklamada kullanılacak) ──
+        def _tf_direction_label(verdict, net):
+            if verdict in ("STRONG_BULLISH", "BULLISH"):
+                return f"LONG (+{abs(net):.0f})"
+            elif verdict == "LEANING_BULLISH":
+                return f"Hafif LONG (+{abs(net):.0f})"
+            elif verdict in ("STRONG_BEARISH", "BEARISH"):
+                return f"SHORT ({net:.0f})"
+            elif verdict == "LEANING_BEARISH":
+                return f"Hafif SHORT ({net:.0f})"
+            else:
+                return f"Nötr ({net:+.0f})"
+
+        tf_summary_4h = _tf_direction_label(v_4h, tf_results["4H"].get("net_score", 0))
+        tf_summary_1h = _tf_direction_label(v_1h, tf_results["1H"].get("net_score", 0))
+        tf_summary_15m = _tf_direction_label(v_15m, tf_results["15m"].get("net_score", 0))
+        tf_breakdown = f"4H: {tf_summary_4h} | 1H: {tf_summary_1h} | 15m: {tf_summary_15m}"
 
         # ── MOMENTUM İVME ANALİZİ (Cross-TF MACD Histogram) ──
         # Her TF'nin MACD histogram yönünü analiz et
@@ -2076,17 +2091,26 @@ def api_coin_detail(symbol):
         if all_bull and not tf_conflict:
             confluence_adj = 8
             overall_net += confluence_adj
-            confluence_bonus = " Tüm zaman dilimleri boğa yönünde uyumlu."
+            confluence_bonus = f" ✅ Tüm zaman dilimleri boğa yönünde uyumlu → güçlü sinyal."
         elif all_bear and not tf_conflict:
             confluence_adj = -8
             overall_net += confluence_adj
-            confluence_bonus = " Tüm zaman dilimleri ayı yönünde uyumlu."
-        elif tf_conflict:
+            confluence_bonus = f" ✅ Tüm zaman dilimleri ayı yönünde uyumlu → güçlü sinyal."
+        elif tf_conflict or tf_conflict_4h_1h:
+            # TF çelişkisi: skoru sıfıra çek — net yön yok
             pre_conflict = overall_net
-            overall_net *= 0.6  # TF çelişkisi varsa güveni %40 azalt
-            overall_net = round(overall_net, 1)
+            # 4H dominant, ama çelişki varken kesin yön vermek YANLIŞ
+            overall_net = round(overall_net * 0.3, 1)  # %70 ceza (eskiden %40'tı)
             confluence_adj = round(overall_net - pre_conflict, 1)
-            confluence_bonus = " ⚠ 4H ve 15m zıt sinyaller veriyor — yön netleşene kadar temkinli olun."
+            # Çelişkiyi net açıkla
+            if v_4h in bull_set and (v_15m in bear_set or v_1h in bear_set):
+                conflict_side = "1H" if v_1h in bear_set else "15m"
+                confluence_bonus = f" ⚠️ ÇATIŞMA: 4H yükseliş yönünde ama {conflict_side} düşüş sinyali veriyor. Bu durumda pozisyon ALMAYIN — 4H kapanışında TF'lerin uyumunu bekleyin."
+            elif v_4h in bear_set and (v_15m in bull_set or v_1h in bull_set):
+                conflict_side = "1H" if v_1h in bull_set else "15m"
+                confluence_bonus = f" ⚠️ ÇATIŞMA: 4H düşüş yönünde ama {conflict_side} yükseliş sinyali veriyor. Bu kısa vadeli tepki olabilir — ana trend (4H) hâlâ ayı, dikkat."
+            else:
+                confluence_bonus = f" ⚠️ ÇATIŞMA: Zaman dilimleri zıt sinyal veriyor — net yön yok, bekleyin."
 
         # Momentum ivme bilgisini açıklamaya ekle
         mom_note = ""
@@ -2134,41 +2158,95 @@ def api_coin_detail(symbol):
             macro_regime_info = {"regime": "UNKNOWN", "regime_label": "Veri Bekleniyor", "btc_bias": "UNKNOWN"}
 
         # Overall verdict — eşikler yükseltildi (false signal azaltmak için)
-        if overall_net >= 30:
+        # TF çelişkisi varken KESİNLİKLE yön verilmez
+        if tf_conflict or tf_conflict_4h_1h:
+            # Çelişki varsa → zorla NÖTR/BEKLE
+            overall = "NEUTRAL"
+            overall_label = "BEKLE ⏳"
+            overall_emoji = "⚠️"
+            overall_desc = (
+                f"⚠️ ZAMAN DİLİMLERİ ÇATIŞIYOR — Pozisyon almayın!\n"
+                f"📊 {tf_breakdown}\n"
+                f"{confluence_bonus.strip()}\n"
+                f"Ana trend (4H) {'yükseliş' if v_4h in bull_set else ('düşüş' if v_4h in bear_set else 'nötr')} yönünde, "
+                f"ancak alt TF'ler zıt sinyal veriyor. TF'ler uyumlanana kadar bekleyin."
+            )
+            if mom_note:
+                overall_desc += f"\n{mom_note.strip()}"
+        elif overall_net >= 30:
             overall = "STRONG_BULLISH"
             overall_label = "GÜÇLÜ BOĞA"
             overall_emoji = "🟢🟢"
-            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü yükseliş sinyali veriyor (skor: +{overall_net}).{regime_note}{confluence_bonus}{mom_note} Geri çekilmelerde LONG pozisyon değerlendirilebilir. Risk yönetimini ihmal etmeyin."
+            overall_desc = (
+                f"Güçlü yükseliş sinyali (skor: +{overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{confluence_bonus.strip()}"
+                f"{mom_note}\n"
+                f"Tüm TF'ler uyumlu — geri çekilmelerde LONG değerlendirilebilir. SL kullanmayı unutmayın."
+            )
         elif overall_net >= 15:
             overall = "BULLISH"
             overall_label = "BOĞA"
             overall_emoji = "🟢"
-            overall_desc = f"Göstergeler yükseliş yönünde ağırlıklı (skor: +{overall_net}).{regime_note}{confluence_bonus}{mom_note} Yükseliş eğilimi var ancak mutlaka 4H trend onayı kontrol edin."
+            overall_desc = (
+                f"Yükseliş ağırlıklı (skor: +{overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{confluence_bonus.strip()}"
+                f"{mom_note}\n"
+                f"LONG yönünde eğilim var. 4H trend onayını kontrol edin."
+            )
         elif overall_net >= 6:
             overall = "LEANING_BULLISH"
             overall_label = "HAFİF BOĞA"
             overall_emoji = "🟡"
-            overall_desc = f"Hafif boğa eğilimi (skor: +{overall_net}).{regime_note}{mom_note} Sinyal güçlü değil — tek başına pozisyon almak için yetersiz. 4H kapanışını ve hacim onayını bekleyin."
+            overall_desc = (
+                f"Hafif yükseliş eğilimi (skor: +{overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{mom_note}\n"
+                f"Sinyal zayıf — pozisyon almak için yetersiz. 4H kapanış ve hacim onayı bekleyin."
+            )
         elif overall_net <= -30:
             overall = "STRONG_BEARISH"
             overall_label = "GÜÇLÜ AYI"
             overall_emoji = "🔴🔴"
-            overall_desc = f"Çoklu gösterge ve zaman dilimi güçlü düşüş sinyali veriyor (skor: {overall_net}).{regime_note}{confluence_bonus}{mom_note} Yükselişlerde SHORT düşünülebilir. SL mutlaka kullanın."
+            overall_desc = (
+                f"Güçlü düşüş sinyali (skor: {overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{confluence_bonus.strip()}"
+                f"{mom_note}\n"
+                f"Tüm TF'ler uyumlu — yükselişlerde SHORT değerlendirilebilir. SL kullanın."
+            )
         elif overall_net <= -15:
             overall = "BEARISH"
             overall_label = "AYI"
             overall_emoji = "🔴"
-            overall_desc = f"Göstergeler düşüş yönünde ağırlıklı (skor: {overall_net}).{regime_note}{confluence_bonus}{mom_note} Düşüş trendi aktif. LONG pozisyonlardan kaçının."
+            overall_desc = (
+                f"Düşüş ağırlıklı (skor: {overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{confluence_bonus.strip()}"
+                f"{mom_note}\n"
+                f"SHORT yönünde eğilim var. LONG pozisyonlardan kaçının."
+            )
         elif overall_net <= -6:
             overall = "LEANING_BEARISH"
             overall_label = "HAFİF AYI"
             overall_emoji = "🟠"
-            overall_desc = f"Hafif ayı eğilimi (skor: {overall_net}).{regime_note}{mom_note} Sinyal güçlü değil — kesin yön için 4H trend ve hacim onayı bekleyin."
+            overall_desc = (
+                f"Hafif düşüş eğilimi (skor: {overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{mom_note}\n"
+                f"Sinyal zayıf — kesin yön için 4H trend ve hacim onayı bekleyin."
+            )
         else:
             overall = "NEUTRAL"
-            overall_label = "NÖTR"
+            overall_label = "NÖTR — BEKLE"
             overall_emoji = "⚪"
-            overall_desc = f"Göstergeler karışık veya zayıf sinyal veriyor (skor: {overall_net}).{regime_note}{mom_note} Bu coin şu an net yön vermiyor — pozisyon almak yerine izlemeye alın."
+            overall_desc = (
+                f"Net yön yok (skor: {overall_net}).{regime_note}\n"
+                f"📊 {tf_breakdown}\n"
+                f"{mom_note}\n"
+                f"Göstergeler karışık — pozisyon almak yerine izlemeye alın."
+            )
 
         # Ek uyarılar
         warnings = []
@@ -2176,7 +2254,9 @@ def api_coin_detail(symbol):
         if atr_4h.get("signal") == "HIGH":
             warnings.append("⚠ Yüksek volatilite — pozisyon boyutunu küçültün, geniş SL kullanın.")
         if tf_conflict:
-            warnings.append("⚠ 4H ve 15m zaman dilimleri zıt sinyal veriyor — güvenilirlik düşük.")
+            warnings.append(f"🚨 4H ve 15m ÇATIŞMA → 4H: {tf_summary_4h}, 15m: {tf_summary_15m}. Pozisyon almayın!")
+        if tf_conflict_4h_1h and not tf_conflict:
+            warnings.append(f"⚠ 4H ve 1H ÇATIŞMA → 4H: {tf_summary_4h}, 1H: {tf_summary_1h}. Dikkatli olun.")
         if any(tf_results[k].get("divergence", {}).get("type") in ("BULLISH", "BEARISH") for k in ["1H", "4H"]):
             div_tfs = [k for k in ["1H", "4H"] if tf_results[k].get("divergence", {}).get("type") in ("BULLISH", "BEARISH")]
             div_types = [tf_results[k]["divergence"]["type"] for k in div_tfs]
@@ -2224,9 +2304,11 @@ def api_coin_detail(symbol):
                 "bull_total": round(total_bull, 1),
                 "bear_total": round(total_bear, 1),
                 "confidence": overall_confidence,
-                "direction": "LONG" if overall_net >= 15 else ("SHORT" if overall_net <= -15 else "NONE"),
-                "verdict_color": "green" if overall_net >= 15 else ("red" if overall_net <= -15 else ("orange" if abs(overall_net) >= 6 else "gray")),
+                "direction": "NONE" if (tf_conflict or tf_conflict_4h_1h) else ("LONG" if overall_net >= 15 else ("SHORT" if overall_net <= -15 else "NONE")),
+                "verdict_color": "gray" if (tf_conflict or tf_conflict_4h_1h) else ("green" if overall_net >= 15 else ("red" if overall_net <= -15 else ("orange" if abs(overall_net) >= 6 else "gray"))),
                 "warnings": warnings,
+                "tf_breakdown": tf_breakdown,
+                "tf_conflict": tf_conflict or tf_conflict_4h_1h,
                 "tf_confluence": "ALL_BULL" if all_bull else ("ALL_BEAR" if all_bear else "MIXED"),
                 "momentum": momentum_accel["status"],
                 "momentum_detail": momentum_accel["detail"] if momentum_accel["status"] != "NEUTRAL" else None,

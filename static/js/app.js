@@ -1239,7 +1239,7 @@ async function openCoinDetail(symbol) {
     const verdictType = ov.verdict || "NEUTRAL";
     verdictBar.className = `detail-verdict-card verdict-${verdictType}`;
     document.getElementById("verdictLabel").textContent = `🤖 ${ov.label || "Bilinmiyor"}`;
-    document.getElementById("verdictDesc").textContent = ov.description || "";
+    document.getElementById("verdictDesc").innerHTML = (ov.description || "").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
 
     // Score bar
     const scoreBar = document.getElementById("verdictScoreBar");
@@ -1303,8 +1303,14 @@ async function openCoinDetail(symbol) {
         const confLabels = {"ALL_BULL": "✅ Tam Boğa Uyumu", "ALL_BEAR": "✅ Tam Ayı Uyumu", "MIXED": "⚡ Karışık TF"};
         const confColors = {"ALL_BULL": "var(--green)", "ALL_BEAR": "var(--red)", "MIXED": "var(--yellow, #f0ad4e)"};
         const conf = ov.tf_confluence || "MIXED";
-        document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
-        document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+        // TF çatışma varsa özel gösterim
+        if (ov.tf_conflict) {
+            document.getElementById("metaConfluence").innerHTML = "🚨 TF Çatışma!";
+            document.getElementById("metaConfluence").style.borderColor = "var(--red)";
+        } else {
+            document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
+            document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+        }
     } else {
         metaEl.style.display = "none";
     }
@@ -1455,11 +1461,18 @@ function renderModalTf(tf) {
     const direction = tfData.direction || "NONE";
     const dirLabel = direction === "LONG" ? "📈 LONG" : direction === "SHORT" ? "📉 SHORT" : "⏳ YÖN YOK";
 
+    // TF rolü açıklaması
+    const tfRole = {
+        "15m": "Giriş Zamanlaması",
+        "1H": "Ara Onay",
+        "4H": "Ana Trend"
+    }[tf] || "";
+
     verdictRow.innerHTML = `
         <span class="tf-verdict-chip ${chipClass}">${verdictEmoji} ${tfData.verdict_label || tfData.verdict}</span>
         <span class="tf-direction-chip ${direction.toLowerCase()}">${dirLabel}</span>
-        <span class="tf-verdict-text">Skor: ${netScore > 0 ? '+' : ''}${netScore} | Güven: ${confidence}</span>
-        <span class="tf-verdict-text">Boğa: ${tfData.bull_score || 0} | Ayı: ${tfData.bear_score || 0}</span>
+        <span class="tf-verdict-text" style="font-weight:600">${tfRole}</span>
+        <span class="tf-verdict-text">Skor: ${netScore > 0 ? '+' : ''}${netScore} | Boğa: ${tfData.bull_score || 0} | Ayı: ${tfData.bear_score || 0}</span>
     `;
 
     // ═══ Pillar Score Summary (3 sütun + destek) ═══
@@ -1797,7 +1810,7 @@ async function refreshCoinDetail() {
         const verdictType = ov.verdict || "NEUTRAL";
         document.getElementById("modalOverallVerdict").className = `detail-verdict-card verdict-${verdictType}`;
         document.getElementById("verdictLabel").textContent = `🤖 ${ov.label || "Bilinmiyor"}`;
-        document.getElementById("verdictDesc").textContent = ov.description || "";
+        document.getElementById("verdictDesc").innerHTML = (ov.description || "").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
 
         // Score bar
         const bullTotal = ov.bull_total || 0;

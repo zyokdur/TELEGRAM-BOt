@@ -80,12 +80,20 @@ class ICTStrategy:
         now = datetime.now(timezone.utc)
         hour = now.hour
 
+        # ICT Session Saatleri (UTC):
+        #   London KZ:     07-10 (kurumsal açılış, yüksek volatilite)
+        #   Geçiş:         10-12 (London aktif, NY hazırlık)
+        #   NY KZ/Overlap: 12-15 (London + NY aktif = en yüksek likidite)
+        #   London Close:  15-17 (geri çekilme, reversal riski)
+        #   Asya:          00-07 (kripto için aktif dönem)
+        #   Off-peak:      17-24 (düşük momentum)
         if 7 <= hour < 10:
             return {"session": "LONDON_KILLZONE", "quality": 1.0, "label": "London Killzone"}
         elif 12 <= hour < 15:
-            return {"session": "NY_KILLZONE", "quality": 1.0, "label": "NY Killzone"}
+            # London hâlâ açık + NY açılışı = gerçek overlap ve en güçlü dönem
+            return {"session": "NY_KILLZONE_OVERLAP", "quality": 1.0, "label": "NY KZ / London-NY Overlap"}
         elif 10 <= hour < 12:
-            return {"session": "LONDON_NY_OVERLAP_PREP", "quality": 0.9, "label": "London-NY Geçiş"}
+            return {"session": "LONDON_CONTINUATION", "quality": 0.9, "label": "London Devam / NY Hazırlık"}
         elif 15 <= hour < 17:
             return {"session": "LONDON_CLOSE", "quality": 0.8, "label": "London Kapanış"}
         elif 0 <= hour < 7:
@@ -505,7 +513,10 @@ class ICTStrategy:
                 if gap / mid_price >= min_size_pct:
                     filled = False
                     if i + 2 < n:
-                        if df.iloc[i + 2:]["low"].min() <= prev_c["high"]:
+                        # ICT: FVG'nin CE (orta nokta) noktasını geçtiyse filled
+                        # Sadece alt sınıra (prev_c.high) dokunmak = "tested", hâlâ geçerli
+                        ce_point = (prev_c["high"] + next_c["low"]) / 2
+                        if df.iloc[i + 2:]["low"].min() <= ce_point:
                             filled = True
                     if not filled:
                         fvgs.append({
@@ -521,7 +532,9 @@ class ICTStrategy:
                 if gap / mid_price >= min_size_pct:
                     filled = False
                     if i + 2 < n:
-                        if df.iloc[i + 2:]["high"].max() >= prev_c["low"]:
+                        # ICT: FVG'nin CE (orta nokta) noktasını geçtiyse filled
+                        ce_point = (next_c["high"] + prev_c["low"]) / 2
+                        if df.iloc[i + 2:]["high"].max() >= ce_point:
                             filled = True
                     if not filled:
                         fvgs.append({
@@ -806,16 +819,18 @@ class ICTStrategy:
 
     def _analyze_htf_bias(self, multi_tf_data):
         """
-        ★ GATE 1 — HTF (4H) yapısından KESTİN yön tespiti.
+        ★ GATE 1 — HTF (4H) yapısından KESİN yön tespiti.
 
         4H BOS/CHoCH yukarıysa → SADECE LONG aranır.
         4H BOS/CHoCH aşağıysa → SADECE SHORT aranır.
         Belirsizse (NEUTRAL) → İŞLEM YAPILMAZ.
 
-        Bu en kritik filtredir — 4H trendi karşısına işlem açmak
-        bireysel yatırımcıların en büyük hatasıdır.
+        ★ v3.0: 4H Premium/Discount matrisi eklendi.
+        4H Bullish ama fiyat 4H Premium bölgesindeyse → riskli LONG.
+        4H Bearish ama fiyat 4H Discount bölgesindeyse → riskli SHORT.
 
-        Returns: {"bias": "LONG"/"SHORT", "htf_trend": str, "structure": dict}
+        Returns: {"bias": "LONG"/"SHORT", "htf_trend": str, "structure": dict,
+                  "htf_pd": dict, "htf_extreme": bool}
                  veya None (belirsiz → işlem yok)
         """
         if not multi_tf_data or "4H" not in multi_tf_data:
@@ -828,17 +843,34 @@ class ICTStrategy:
         structure = self.detect_market_structure(htf_df)
         htf_liquidity = self.find_liquidity_levels(htf_df)
 
-        result_base = {"structure": structure, "liquidity": htf_liquidity}
+        # ── 4H Premium/Discount Matrisi ──
+        htf_pd = self.calculate_premium_discount(htf_df, structure)
+        htf_extreme = False  # 4H extreme zone flag
+
+        result_base = {
+            "structure": structure,
+            "liquidity": htf_liquidity,
+            "htf_pd": htf_pd,
+            "htf_extreme": False,
+        }
 
         if structure["trend"] == "BULLISH":
+            # 4H Bullish + Fiyat 4H Extreme Premium (%80+) → riskli LONG
+            if htf_pd and htf_pd["premium_level"] > 80:
+                result_base["htf_extreme"] = True
+                logger.debug(f"  ⚠️ 4H Bullish ama Extreme Premium ({htf_pd['premium_level']:.0f}%)")
             return {**result_base, "bias": "LONG", "htf_trend": "BULLISH", "weak": False}
+
         elif structure["trend"] == "BEARISH":
+            # 4H Bearish + Fiyat 4H Extreme Discount (%20-) → riskli SHORT
+            if htf_pd and htf_pd["premium_level"] < 20:
+                result_base["htf_extreme"] = True
+                logger.debug(f"  ⚠️ 4H Bearish ama Extreme Discount ({htf_pd['premium_level']:.0f}%)")
             return {**result_base, "bias": "SHORT", "htf_trend": "BEARISH", "weak": False}
+
         elif structure["trend"] == "WEAKENING_BEAR":
-            # Düşüş zayıflıyor → potansiyel LONG (dikkatli)
             return {**result_base, "bias": "LONG", "htf_trend": "WEAKENING_BEAR", "weak": True}
         elif structure["trend"] == "WEAKENING_BULL":
-            # Yükseliş zayıflıyor → potansiyel SHORT (dikkatli)
             return {**result_base, "bias": "SHORT", "htf_trend": "WEAKENING_BULL", "weak": True}
 
         return None  # NEUTRAL → NET YÖN YOK → İŞLEM YAPILMAZ
@@ -878,6 +910,10 @@ class ICTStrategy:
         session = self.get_session_info()
         session_quality = session.get("quality", 0.7)
 
+        # ── PDH/PDL (Previous Day High/Low) ve Session Range Seviyeleri ──
+        # 15m veride ~96 mum = 1 gün. Son 96-192 arası = önceki gün
+        major_levels = self._calc_major_levels(df)
+
         if bias == "LONG":
             # LONG → SSL (Sell-Side Liquidity) avı → eski swing low altına fitil
             for sw in reversed(swing_lows):
@@ -896,13 +932,20 @@ class ICTStrategy:
                                 liquidity_levels, has_volume, avg_volume,
                                 session_quality, df=df
                             )
+                            # ── Major Level Bonusu ──
+                            is_major = self._is_major_level_sweep(
+                                sw_price, bias, major_levels
+                            )
+                            if is_major:
+                                sweep_quality = min(2.5, sweep_quality + 0.4)
                             return {
                                 "swept_level": sw_price,
                                 "sweep_candle_idx": i,
                                 "sweep_wick": candle["low"],
                                 "sweep_type": "SSL_SWEEP",
                                 "swing_index": sw_idx,
-                                "sweep_quality": sweep_quality
+                                "sweep_quality": sweep_quality,
+                                "major_level": is_major,
                             }
 
         elif bias == "SHORT":
@@ -920,16 +963,159 @@ class ICTStrategy:
                                 liquidity_levels, has_volume, avg_volume,
                                 session_quality, df=df
                             )
+                            is_major = self._is_major_level_sweep(
+                                sw_price, bias, major_levels
+                            )
+                            if is_major:
+                                sweep_quality = min(2.5, sweep_quality + 0.4)
                             return {
                                 "swept_level": sw_price,
                                 "sweep_candle_idx": i,
                                 "sweep_wick": candle["high"],
                                 "sweep_type": "BSL_SWEEP",
                                 "swing_index": sw_idx,
-                                "sweep_quality": sweep_quality
+                                "sweep_quality": sweep_quality,
+                                "major_level": is_major,
                             }
 
         return None
+
+    def _calc_major_levels(self, df):
+        """
+        PDH/PDL (Previous Day High/Low) ve Session Range seviyelerini hesapla.
+        15m veride ~96 mum = 1 gün.
+        
+        Returns: {"pdh": float, "pdl": float, "session_high": float, "session_low": float}
+        """
+        n = len(df)
+        result = {}
+
+        # PDH/PDL: Son 96-192 arası (önceki gün)
+        if n >= 192:
+            prev_day = df.iloc[-192:-96]
+            result["pdh"] = prev_day["high"].max()
+            result["pdl"] = prev_day["low"].min()
+        elif n >= 96:
+            # Yeterli veri yoksa mevcut günün önceki yarısını kullan
+            half = n // 2
+            prev_half = df.iloc[:half]
+            result["pdh"] = prev_half["high"].max()
+            result["pdl"] = prev_half["low"].min()
+
+        # Session Range: Son 28 mum (~7 saat = yaklaşık 1 session)
+        session_candles = min(28, n)
+        session_data = df.iloc[-session_candles:]
+        result["session_high"] = session_data["high"].max()
+        result["session_low"] = session_data["low"].min()
+
+        return result
+
+    def _is_major_level_sweep(self, swept_level, bias, major_levels):
+        """
+        Sweep edilen seviye PDH/PDL veya Session High/Low mu?
+        ICT'de bu seviyeler en güçlü likidite havuzlarıdır.
+        """
+        tolerance = 0.003  # %0.3 tolerans
+
+        if bias == "LONG":
+            # SSL sweep → PDL veya Session Low yakınında mı?
+            pdl = major_levels.get("pdl")
+            session_low = major_levels.get("session_low")
+            if pdl and abs(swept_level - pdl) / pdl <= tolerance:
+                return "PDL"
+            if session_low and abs(swept_level - session_low) / session_low <= tolerance:
+                return "SESSION_LOW"
+        elif bias == "SHORT":
+            # BSL sweep → PDH veya Session High yakınında mı?
+            pdh = major_levels.get("pdh")
+            session_high = major_levels.get("session_high")
+            if pdh and abs(swept_level - pdh) / pdh <= tolerance:
+                return "PDH"
+            if session_high and abs(swept_level - session_high) / session_high <= tolerance:
+                return "SESSION_HIGH"
+
+        return None
+
+    # =================================================================
+    #  BÖLÜM 12.5 — UNICORN SETUP (OB + FVG Geometrik Çakışma)
+    # =================================================================
+
+    def _detect_unicorn_setup(self, df, fvg, bias, structure):
+        """
+        Unicorn Setup: Order Block + FVG geometrik çakışma.
+
+        ICT'nin en güçlü setup'larından biri — iki kurumsal ayak izi
+        aynı fiyat bölgesinde üst üste gelir:
+          • Order Block: Kurumsal emir bölgesi (önceki güçlü mum)
+          • FVG: Emir boşluğu (3 mumlu imbalance)
+
+        Bu çakışma, kurumların aynı bölgede hem emir bıraktığını hem de
+        fiyat boşluğu yarattığını gösterir → çok yüksek olasılıklı giriş.
+
+        LONG: Bullish OB ∩ Bullish FVG → entry overlap'in alt kenarı
+        SHORT: Bearish OB ∩ Bearish FVG → entry overlap'in üst kenarı
+
+        Returns: dict veya None
+        """
+        if not fvg:
+            return None
+
+        active_obs, _ = self.find_order_blocks(df, structure)
+        target_ob_type = "BULLISH_OB" if bias == "LONG" else "BEARISH_OB"
+
+        best_unicorn = None
+
+        for ob in active_obs:
+            if ob["type"] != target_ob_type:
+                continue
+
+            # Geometrik çakışma: OB ve FVG arasında overlap var mı?
+            overlap_low = max(ob["low"], fvg["low"])
+            overlap_high = min(ob["high"], fvg["high"])
+
+            if overlap_low >= overlap_high:
+                continue  # Çakışma yok
+
+            # Overlap bölgesinin boyutunu kontrol et
+            fvg_size = fvg["high"] - fvg["low"]
+            if fvg_size <= 0:
+                continue
+
+            overlap_size = overlap_high - overlap_low
+            overlap_ratio = overlap_size / fvg_size
+
+            # Minimum %20 overlap olmalı
+            if overlap_ratio < 0.20:
+                continue
+
+            # Junction entry: LONG → overlap'in alt kısmı (discount giriş)
+            #                  SHORT → overlap'in üst kısmı (premium giriş)
+            if bias == "LONG":
+                junction_entry = overlap_low
+            else:
+                junction_entry = overlap_high
+
+            candidate = {
+                "ob": ob,
+                "fvg": fvg,
+                "overlap_low": overlap_low,
+                "overlap_high": overlap_high,
+                "overlap_ratio": round(overlap_ratio, 3),
+                "junction_entry": junction_entry,
+            }
+
+            # En büyük overlap'i tercih et
+            if best_unicorn is None or overlap_ratio > best_unicorn["overlap_ratio"]:
+                best_unicorn = candidate
+
+        if best_unicorn:
+            logger.info(
+                f"🦄 UNICORN SETUP: OB({target_ob_type}) ∩ FVG → "
+                f"Overlap: {best_unicorn['overlap_ratio']:.0%} | "
+                f"Junction entry: {best_unicorn['junction_entry']:.8f}"
+            )
+
+        return best_unicorn
 
     def _calc_sweep_quality(self, swept_level, candle, candle_idx, n, bias,
                             liquidity_levels, has_volume, avg_volume, session_quality,
@@ -1020,9 +1206,27 @@ class ICTStrategy:
                 quality -= 0.3  # Neredeyse fitilsiz = muhtemelen fake
 
         # 7) ★ OB + liquidity alignment: Sweep seviyesinde OB var mı?
+        # NOT: structure dışarıdan alınmaya çalışılır (performans için)
+        # Her sweep quality hesabında detect_market_structure tekrar çağırmak gereksiz
         if df is not None:
-            structure = self.detect_market_structure(df)
-            active_obs, _ = self.find_order_blocks(df, structure)
+            # structure zaten generate_signal'de hesaplandı, burada basit OB arama yap
+            # Sadece sweep civarındaki mumları kontrol ederek yaklaşık OB bul
+            active_obs = []
+            sweep_idx = getattr(candle, 'name', None) or (len(df) - 1)
+            search_start = max(0, sweep_idx - 20)
+            for idx in range(search_start, min(sweep_idx, len(df))):
+                c = df.iloc[idx]
+                c_body = abs(c["close"] - c["open"])
+                c_range = c["high"] - c["low"]
+                if c_range <= 0:
+                    continue
+                c_body_ratio = c_body / c_range
+                if c_body_ratio < 0.4:
+                    continue
+                if bias == "LONG" and c["close"] < c["open"]:  # Bearish candle before bullish move
+                    active_obs.append({"type": "BULLISH_OB", "low": c["low"], "high": c["high"]})
+                elif bias == "SHORT" and c["close"] > c["open"]:  # Bullish candle before bearish move
+                    active_obs.append({"type": "BEARISH_OB", "low": c["low"], "high": c["high"]})
             for ob in active_obs:
                 if bias == "LONG" and ob["type"] == "BULLISH_OB":
                     if ob["low"] <= swept_level <= ob["high"] * 1.005:
@@ -1261,14 +1465,9 @@ class ICTStrategy:
             # En yakın olanı seç (unnecessarily geniş SL'den kaçın)
             best = max(valid, key=lambda x: x[1])
 
-            # ATR minimum SL floor: SL mesafesi en az 1.0 × ATR olmalı
-            atr = self._calc_atr(df, 14)
-            if atr > 0:
-                entry_approx = df["close"].iloc[-1]
-                min_sl_by_atr = entry_approx - atr
-                if best[1] > min_sl_by_atr:
-                    best = ("ATR_FLOOR", min_sl_by_atr)
-                    logger.debug(f"  LONG SL: ATR floor uygulandı → {best[1]:.8f}")
+            # NOT: ATR floor KALDIRILDI — yapısal SL'yi bozarak genişletmek yanlış.
+            # Yapısal SL volatiliteye göre çok darsa, generate_signal()'deki
+            # effective_min_sl kontrolü sinyali reddeder (doğru davranış).
 
             logger.debug(f"  LONG SL: {best[0]} @ {best[1]:.8f}")
             return best[1]
@@ -1289,14 +1488,9 @@ class ICTStrategy:
 
             best = min(valid, key=lambda x: x[1])
 
-            # ATR minimum SL floor: SL mesafesi en az 1.0 × ATR olmalı
-            atr = self._calc_atr(df, 14)
-            if atr > 0:
-                entry_approx = df["close"].iloc[-1]
-                max_sl_by_atr = entry_approx + atr
-                if best[1] < max_sl_by_atr:
-                    best = ("ATR_FLOOR", max_sl_by_atr)
-                    logger.debug(f"  SHORT SL: ATR floor uygulandı → {best[1]:.8f}")
+            # NOT: ATR floor KALDIRILDI — yapısal SL'yi bozarak genişletmek yanlış.
+            # Yapısal SL volatiliteye göre çok darsa, generate_signal()'deki
+            # effective_min_sl kontrolü sinyali reddeder (doğru davranış).
 
             logger.debug(f"  SHORT SL: {best[0]} @ {best[1]:.8f}")
             return best[1]
@@ -1397,13 +1591,33 @@ class ICTStrategy:
             else:
                 return entry - (risk * min_rr)
 
-        # Minimum 2.0 R:R sağlayan en yakın yapısal hedefi seç
+        # Minimum 2.0 R:R sağlayan hedefleri filtrele + HTF öncelikli seçim
         min_reward = risk * 2.0
 
         if bias == "LONG":
             valid = [(n, p) for n, p in tp_candidates if (p - entry) >= min_reward]
             if valid:
-                best = min(valid, key=lambda x: x[1])  # En yakın geçerli hedef
+                # HTF ve LTF ayır
+                htf_valid = [(n, p) for n, p in valid if n == "HTF_DRAW_LIQ"]
+                ltf_valid = [(n, p) for n, p in valid if n != "HTF_DRAW_LIQ"]
+                nearest_ltf = min(ltf_valid, key=lambda x: x[1]) if ltf_valid else None
+
+                # HTF hedef varsa ve makul mesafedeyse (LTF en yakının 3x'i içinde) tercih et
+                if htf_valid and nearest_ltf:
+                    nearest_htf = min(htf_valid, key=lambda x: x[1])
+                    ltf_dist = nearest_ltf[1] - entry
+                    htf_dist = nearest_htf[1] - entry
+                    if htf_dist <= ltf_dist * 3.0:
+                        best = nearest_htf
+                        logger.debug(f"  LONG TP: HTF öncelikli → {best[0]} @ {best[1]:.8f}")
+                        return best[1]
+                elif htf_valid and not nearest_ltf:
+                    best = min(htf_valid, key=lambda x: x[1])
+                    logger.debug(f"  LONG TP: Sadece HTF → {best[0]} @ {best[1]:.8f}")
+                    return best[1]
+
+                # HTF tercih edilmediyse en yakın geçerli hedef
+                best = min(valid, key=lambda x: x[1])
                 logger.debug(f"  LONG TP: {best[0]} @ {best[1]:.8f}")
                 return best[1]
             # 2.0 RR sağlayan hedef yoksa en uzak olanı dene
@@ -1414,7 +1628,27 @@ class ICTStrategy:
         else:
             valid = [(n, p) for n, p in tp_candidates if (entry - p) >= min_reward]
             if valid:
-                best = max(valid, key=lambda x: x[1])  # En yakın geçerli hedef (SHORT için en yüksek)
+                # HTF ve LTF ayır
+                htf_valid = [(n, p) for n, p in valid if n == "HTF_DRAW_LIQ"]
+                ltf_valid = [(n, p) for n, p in valid if n != "HTF_DRAW_LIQ"]
+                nearest_ltf = max(ltf_valid, key=lambda x: x[1]) if ltf_valid else None
+
+                # HTF hedef varsa ve makul mesafedeyse tercih et
+                if htf_valid and nearest_ltf:
+                    nearest_htf = max(htf_valid, key=lambda x: x[1])
+                    ltf_dist = entry - nearest_ltf[1]
+                    htf_dist = entry - nearest_htf[1]
+                    if htf_dist <= ltf_dist * 3.0:
+                        best = nearest_htf
+                        logger.debug(f"  SHORT TP: HTF öncelikli → {best[0]} @ {best[1]:.8f}")
+                        return best[1]
+                elif htf_valid and not nearest_ltf:
+                    best = max(htf_valid, key=lambda x: x[1])
+                    logger.debug(f"  SHORT TP: Sadece HTF → {best[0]} @ {best[1]:.8f}")
+                    return best[1]
+
+                # HTF tercih edilmediyse en yakın geçerli hedef
+                best = max(valid, key=lambda x: x[1])
                 logger.debug(f"  SHORT TP: {best[0]} @ {best[1]:.8f}")
                 return best[1]
             if tp_candidates:
@@ -1511,6 +1745,36 @@ class ICTStrategy:
             else:
                 # HTF var ama kısmi uyum
                 score += 10
+
+            # ── 4H Premium/Discount Matrisi Cezası ──
+            # 4H Bullish ama fiyat 4H extreme premium → LONG riskli
+            # 4H Bearish ama fiyat 4H extreme discount → SHORT riskli
+            htf_pd = htf_result.get("htf_pd")
+            htf_extreme = htf_result.get("htf_extreme", False)
+            analysis["htf_pd"] = htf_pd
+            analysis["htf_extreme"] = htf_extreme
+
+            if htf_extreme:
+                score -= 12
+                penalties.append("HTF_EXTREME_ZONE(-12)")
+            elif htf_pd:
+                pd_level = htf_pd["premium_level"]
+                # LONG ideal: Discount (%0-40), uyarı: Premium (%60-80)
+                # SHORT ideal: Premium (%60-100), uyarı: Discount (%20-40)
+                if htf_result["bias"] == "LONG":
+                    if pd_level < 40:
+                        score += 5
+                        components.append("HTF_DISCOUNT_ZONE")
+                    elif pd_level > 65:
+                        score -= 5
+                        penalties.append("HTF_PREMIUM_WARNING(-5)")
+                elif htf_result["bias"] == "SHORT":
+                    if pd_level > 60:
+                        score += 5
+                        components.append("HTF_PREMIUM_ZONE")
+                    elif pd_level < 35:
+                        score -= 5
+                        penalties.append("HTF_DISCOUNT_WARNING(-5)")
         else:
             analysis["htf_trend"] = "UNKNOWN"
             analysis["htf_structure"] = None
@@ -1640,6 +1904,16 @@ class ICTStrategy:
                     break
         analysis["relevant_obs"] = relevant_obs
 
+        # === UNICORN SETUP (OB + FVG Çakışma) ===
+        disp_fvg_for_unicorn = analysis.get("displacement_fvg")
+        unicorn = None
+        if disp_fvg_for_unicorn and direction:
+            unicorn = self._detect_unicorn_setup(df, disp_fvg_for_unicorn, direction, structure)
+        analysis["unicorn_setup"] = unicorn
+        if unicorn:
+            score += 8
+            components.append("UNICORN_SETUP")
+
         # === BREAKER BLOCKS (bonus) ===
         breaker_blocks = self.find_breaker_blocks(all_obs, df)
         analysis["breaker_blocks"] = breaker_blocks
@@ -1758,11 +2032,13 @@ class ICTStrategy:
             components.append("HTF_SWEEP_DISP_MULTIPLIER")
 
         # Normalize (0-100)
-        # Teorik max: HTF(25) + Sweep(35) + Disp(15) + FVG(15) + Structure(10)
-        #   + MTF(10) + MTF_OB(5) + MTF_FVG(3) + PD(7) + OTE(3) + Session(8)
-        #   + OB(5) + Breaker(5) + MSS(10) + Triple_TF(3) + VolDisp(5)
-        #   + Non-linear multiplier(×1.2) = ~197 max
-        max_possible = 197  # Sweep quality + volume displacement + NL multiplier dahil
+        # Teorik max (multiplier öncesi): HTF(25) + Sweep(35 cap) + Disp(15)
+        #   + FVG(15) + Structure(10) + MTF(10) + MTF_OB(5) + MTF_FVG(3)
+        #   + PD(7) + OTE(3) + Session(8) + OB(5) + Breaker(5) + MSS(10)
+        #   + Triple_TF(3) + VolDisp(5) + Unicorn(8) + HTF_PD_Zone(5) = 177
+        # Non-linear multiplier(×1.2) = 177 * 1.2 = ~212
+        # Ranging cezası ve diğer penaltiler max'ı düşürmez (min 0 koruması var)
+        max_possible = 212
         score = max(0, score)
         confluence_score = min(100, round((score / max_possible) * 100, 1))
 
@@ -1812,6 +2088,8 @@ class ICTStrategy:
             bonus += 3
         if "TRIPLE_TF_ALIGNMENT" in components:
             bonus += 5
+        if "UNICORN_SETUP" in components:
+            bonus += 8  # OB+FVG çakışma → çok yüksek güven
 
         # Cezalar
         # NOT: Confluence'da zaten uygulanan cezalar burada tekrarlanmaz
@@ -1956,8 +2234,15 @@ class ICTStrategy:
         logger.info(f"🎯 {symbol}: Tüm ICT gate'leri geçti: HTF={htf_result['htf_trend']}, "
                     f"Sweep={sweep['sweep_type']}, Displacement+{'MSS' if confirmation['mss_confirmed'] else 'noMSS'}")
 
-        # FVG'nin CE noktası (Consequent Encroachment = orta nokta) = ENTRY
-        entry = (entry_fvg["high"] + entry_fvg["low"]) / 2
+        # ===== UNICORN SETUP — OB + FVG Çakışma Kontrolü =====
+        unicorn = self._detect_unicorn_setup(df, entry_fvg, bias, structure)
+        if unicorn:
+            # Unicorn Setup → entry'yi FVG+OB junction'a kaydır (daha hassas giriş)
+            entry = unicorn["junction_entry"]
+            logger.info(f"🦄 {symbol}: UNICORN SETUP — OB+FVG çakışma → Entry: {entry:.8f}")
+        else:
+            # Normal CE entry (Consequent Encroachment = orta nokta)
+            entry = (entry_fvg["high"] + entry_fvg["low"]) / 2
 
         # Yapısal SL
         sl = self._calc_structural_sl(df, sweep, bias, structure)
@@ -2125,7 +2410,8 @@ class ICTStrategy:
                 return b_signal
 
         # Yetersiz çakışma → standart WATCH
-        if confluence_score < min_confluence * 0.3:
+        # min_confluence'ın %50'si altındaysa hiç WATCH bile yapma
+        if confluence_score < min_confluence * 0.5:
             return None
 
         return self._build_signal_dict(
@@ -2272,8 +2558,13 @@ class ICTStrategy:
 
     def _build_signal_dict(self, symbol, bias, current_price, analysis, confidence,
                            action="WATCH", watch_reason=""):
-        """WATCH sinyalleri için ortak dict oluşturucu."""
-        # Basit SL/TP tahmini (WATCH için yaklaşık)
+        """WATCH sinyalleri için ortak dict oluşturucu.
+        
+        DİKKAT: Bu metod ICT gate'lerini GEÇMEMİŞ sinyaller içindir.
+        quality_tier = "POTENTIAL" → trade_manager'da ASLA trade açılmaz.
+        Sadece bilgilendirme amaçlı WATCH'a alınabilir.
+        """
+        # Basit SL/TP tahmini (WATCH için yaklaşık — trade'e dönüşmeyecek)
         structure = analysis.get("structure", {})
         sl_pct = self.params.get("default_sl_pct", 0.015)
         tp_ratio = self.params.get("default_tp_ratio", 2.5)
@@ -2310,7 +2601,11 @@ class ICTStrategy:
             "entry_mode": "PENDING",
             "action": action,
             "watch_reason": watch_reason,
-            "analysis": analysis
+            "analysis": analysis,
+            # ── KRİTİK: Gate'leri geçmemiş → POTENTIAL tier
+            # trade_manager bu tier ile ASLA trade açmaz
+            "quality_tier": "POTENTIAL",
+            "htf_bias": analysis.get("htf_bias", "?"),
         }
 
         return result
