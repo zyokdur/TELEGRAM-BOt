@@ -204,7 +204,7 @@ def init_db():
             candles_watched INTEGER DEFAULT 0,
             confirmation_count INTEGER DEFAULT 0,
             last_5m_candle_ts TEXT,
-            max_watch_candles INTEGER DEFAULT 3,
+            max_watch_candles INTEGER DEFAULT 2,
             initial_score {_FLOAT},
             current_score {_FLOAT},
             status TEXT DEFAULT 'WATCHING',
@@ -299,7 +299,7 @@ def init_db():
             potential_tp {_FLOAT},
             watch_reason TEXT,
             candles_watched INTEGER DEFAULT 0,
-            max_watch_candles INTEGER DEFAULT 3,
+            max_watch_candles INTEGER DEFAULT 2,
             initial_score {_FLOAT},
             current_score {_FLOAT},
             status TEXT DEFAULT 'WATCHING',
@@ -418,7 +418,7 @@ def get_active_trade_count():
 # =================== İZLEME LİSTESİ ===================
 
 def add_to_watchlist(symbol, direction, potential_entry, potential_sl, potential_tp,
-                     watch_reason, initial_score, components, max_watch=3):
+                     watch_reason, initial_score, components, max_watch=2):
     # Aynı sembol ve yönde zaten izleniyor mu?
     existing = _fetchone("""
         SELECT id FROM watchlist WHERE symbol=? AND direction=? AND status='WATCHING'
@@ -891,7 +891,7 @@ def get_active_qpa_trade_count():
 # =================== QPA İZLEME LİSTESİ ===================
 
 def add_to_qpa_watchlist(symbol, direction, potential_entry, potential_sl, potential_tp,
-                         watch_reason, initial_score, components, max_watch=3):
+                         watch_reason, initial_score, components, max_watch=2):
     existing = _fetchone("""
         SELECT id FROM qpa_watchlist WHERE symbol=? AND direction=? AND status='WATCHING'
     """, (symbol, direction))

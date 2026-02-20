@@ -1162,13 +1162,70 @@ button:focus:not(:focus-visible) { outline: none; }
 .perf-stat-loss { color: var(--red); }
 
 /* =====================================================
-   § MARKET REGIME PAGE
+   § MARKET REGIME PAGE — Piyasa Nabzı Dashboard
    ===================================================== */
+
+/* ── Hero Bar (Ana Rejim + Fear&Greed) ── */
+.regime-hero {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-card);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 18px 20px;
+    margin-bottom: 12px;
+    gap: 16px;
+}
+.regime-hero-left {
+    display: flex; align-items: center; gap: 14px;
+}
+.regime-hero-icon {
+    width: 46px; height: 46px;
+    border-radius: var(--radius-md);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+    background: rgba(99,102,241,0.12);
+    color: var(--text-secondary);
+    border: 1px solid rgba(99,102,241,0.2);
+    flex-shrink: 0;
+}
+.regime-hero-info { display: flex; flex-direction: column; gap: 2px; }
+.regime-hero-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
+.regime-hero-value { font-size: 16px; font-weight: 800; color: var(--text-primary); }
+
+/* Fear & Greed Gauge */
+.fear-greed-gauge { display: flex; align-items: center; gap: 12px; }
+.fg-meter {
+    width: 120px; height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #ef4444 0%, #f97316 25%, #94a3b8 50%, #22c55e 75%, #16a34a 100%);
+    position: relative;
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.3);
+}
+.fg-fill {
+    position: absolute;
+    top: -3px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: white;
+    border: 2px solid var(--text-primary);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    transition: left .5s ease;
+    left: 50%;
+    transform: translateX(-50%);
+}
+.fg-info { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; min-width: 60px; }
+.fg-label { font-size: 10px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
+.fg-score { font-size: 22px; font-weight: 800; font-family: var(--mono); }
+
+/* ── Quick Indicator Cards ── */
 .regime-cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 10px;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
 }
 
 .regime-card {
@@ -1176,25 +1233,19 @@ button:focus:not(:focus-visible) { outline: none; }
     backdrop-filter: blur(8px);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 16px;
+    padding: 14px;
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
     transition: all .25s;
 }
 .regime-card:hover { border-color: var(--border-light); transform: translateY(-1px); }
 
-.regime-card.regime-main {
-    border-color: rgba(255,255,255,0.12);
-    background: linear-gradient(135deg, rgba(99,102,241,0.07), transparent 60%);
-    box-shadow: 0 0 15px rgba(99,102,241,0.04);
-}
-
 .regime-card-icon {
-    width: 40px; height: 40px;
+    width: 36px; height: 36px;
     border-radius: var(--radius-md);
     display: flex; align-items: center; justify-content: center;
-    font-size: 17px;
+    font-size: 15px;
     background: rgba(148,163,184,0.08);
     color: var(--text-secondary);
     flex-shrink: 0;
@@ -1205,7 +1256,50 @@ button:focus:not(:focus-visible) { outline: none; }
 
 .regime-card-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .regime-card-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; font-weight: 600; }
-.regime-card-value { font-size: 13px; font-weight: 700; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.regime-card-value { font-size: 12px; font-weight: 700; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Altcoin Index Bar ── */
+.altcoin-index-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    background: var(--bg-card);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    gap: 8px;
+}
+.alt-index-item { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.alt-index-label { font-size: 9px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+.alt-index-value { font-size: 13px; font-weight: 800; font-family: var(--mono); }
+.alt-index-sep { width: 1px; height: 28px; background: var(--border); }
+
+/* ── Market Commentary ── */
+.market-commentary-card { margin-bottom: 14px; }
+.commentary-sections { display: flex; flex-direction: column; gap: 0; }
+.commentary-section {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+.commentary-section:last-child { border-bottom: none; }
+.commentary-icon {
+    width: 32px; height: 32px;
+    border-radius: var(--radius-sm);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    background: rgba(99,102,241,0.08);
+    color: var(--purple, #818cf8);
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+.commentary-body { flex: 1; min-width: 0; }
+.commentary-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; color: var(--text-secondary); margin-bottom: 4px; }
+.commentary-text { font-size: 13px; color: var(--text-primary); line-height: 1.6; }
 
 /* Opportunity Bar */
 .regime-opportunity-bar { display: flex; gap: 10px; margin-bottom: 14px; }
@@ -1942,7 +2036,11 @@ button:focus:not(:focus-visible) { outline: none; }
     .topbar-info { display: none; }
     .logo-text { display: none; }
     .sidebar-header { justify-content: center; }
-    .regime-cards { grid-template-columns: repeat(2, 1fr); }
+    .regime-cards { grid-template-columns: repeat(3, 1fr); }
+    .regime-hero { flex-direction: column; align-items: stretch; }
+    .regime-hero-right { justify-content: center; }
+    .altcoin-index-bar { flex-wrap: wrap; }
+    .alt-index-sep:nth-child(6) { display: none; }
     .opt-summary { grid-template-columns: 1fr 1fr; }
 }
 
@@ -2014,7 +2112,11 @@ button:focus:not(:focus-visible) { outline: none; }
     .toast { min-width: auto; width: 100%; }
 
     .history-stats { flex-direction: column; gap: 6px; }
-    .regime-cards { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .regime-cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .altcoin-index-bar { gap: 4px; padding: 10px 8px; }
+    .alt-index-label { font-size: 8px; }
+    .alt-index-value { font-size: 11px; }
+    .commentary-section { padding: 10px 12px; }
     .regime-opportunity-bar { flex-direction: column; gap: 6px; }
 
     .indicators-grid { grid-template-columns: 1fr; }
@@ -2074,7 +2176,14 @@ button:focus:not(:focus-visible) { outline: none; }
     .badge { font-size: 8px; padding: 2px 5px; }
 
     .cd-section-head { flex-direction: column; align-items: flex-start; gap: 6px; }
-    .regime-cards { grid-template-columns: 1fr; }
+    .regime-cards { grid-template-columns: 1fr 1fr; }
+    .regime-hero { padding: 12px; gap: 10px; }
+    .regime-hero-value { font-size: 14px; }
+    .fg-meter { width: 80px; }
+    .fg-score { font-size: 18px; }
+    .altcoin-index-bar { flex-direction: column; gap: 6px; align-items: stretch; }
+    .alt-index-item { flex-direction: row; justify-content: space-between; }
+    .alt-index-sep { display: none; }
 
     /* Card padding tighter */
     .card-header { padding: 10px 12px; font-size: 12px; }

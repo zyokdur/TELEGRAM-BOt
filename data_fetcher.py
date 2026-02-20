@@ -2,7 +2,7 @@
 # ICT Trading Bot - OKX Gerçek Zamanlı Veri Modülü
 # =====================================================
 # OKX Public API üzerinden gerçek piyasa verileri çeker.
-# 24 saatlik hacmi 5M USDT üzerindeki coinleri dinamik filtreler.
+# 24 saatlik hacmi MIN_VOLUME_USDT üzerindeki coinleri dinamik filtreler.
 # Hiçbir demo/mock/test verisi kullanılmaz.
 # =====================================================
 
@@ -27,26 +27,53 @@ class OKXDataFetcher:
             "User-Agent": "ICT-Trading-Bot/1.0"
         })
         self._cache = {}
-        self._cache_ttl = 15  # saniye
+        self._cache_ttl = 45  # saniye (100 coin taraması ~165s, kısa TTL cache'i etkisiz kılar)
         self._active_coins = []           # Dinamik coin listesi
         self._coins_last_refresh = 0      # Son yenileme zamanı
         self._coin_volumes = {}           # Coin -> hacim bilgisi
 
-    def _make_request(self, endpoint, params=None):
-        """API isteği gönder"""
+    def _make_request(self, endpoint, params=None, max_retries=3):
+        """API isteği gönder (rate limit retry + exponential backoff)"""
         url = f"{OKX_API_V5}{endpoint}"
-        try:
-            response = self.session.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            if data.get("code") == "0":
-                return data.get("data", [])
-            else:
-                logger.warning(f"OKX API hatası: {data.get('msg', 'Bilinmeyen hata')}")
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, params=params, timeout=10)
+
+                # HTTP 429 Rate Limit
+                if response.status_code == 429:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning(f"⚠️ OKX Rate Limit (429) — {wait}s bekleniyor... (deneme {attempt+1}/{max_retries})")
+                    time.sleep(wait)
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+                code = data.get("code", "")
+
+                # OKX özel rate limit hata kodu (50011)
+                if code == "50011":
+                    wait = 2 ** attempt
+                    logger.warning(f"⚠️ OKX Too Many Requests (50011) — {wait}s bekleniyor... (deneme {attempt+1}/{max_retries})")
+                    time.sleep(wait)
+                    continue
+
+                if code == "0":
+                    return data.get("data", [])
+                else:
+                    logger.warning(f"OKX API hatası [code={code}]: {data.get('msg', 'Bilinmeyen hata')}")
+                    return []
+
+            except requests.exceptions.Timeout:
+                wait = 2 ** attempt
+                logger.warning(f"⏱️ OKX API timeout — {wait}s bekleniyor... (deneme {attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.error(f"OKX API bağlantı hatası: {e}")
                 return []
-        except requests.exceptions.RequestException as e:
-            logger.error(f"OKX API bağlantı hatası: {e}")
-            return []
+
+        logger.error(f"OKX API {max_retries} denemede başarısız: {endpoint}")
+        return []
 
     def get_candles(self, symbol, timeframe="15m", limit=100):
         """
@@ -136,12 +163,18 @@ class OKXDataFetcher:
                 continue
 
             last_price = float(item.get("last", 0))
-            vol_coin = float(item.get("vol24h", 0))           # Coin cinsinden hacim
-            vol_ccy = float(item.get("volCcy24h", 0))         # USDT cinsinden hacim
+            vol_coin = float(item.get("vol24h", 0))           # Coin cinsinden hacim (SWAP: kontrat sayısı)
+            vol_ccy = float(item.get("volCcy24h", 0))         # SWAP: underlying asset cinsinden, SPOT: quote (USDT)
             open_24h = float(item.get("open24h", 0))
 
-            # volCcy24h yoksa fiyat × adet ile hesapla
-            volume_usdt = vol_ccy if vol_ccy > 0 else (vol_coin * last_price)
+            # ── Hacim hesaplama ──
+            # SWAP: volCcy24h underlying asset cinsinden (BTC, ETH, SOL vb.)
+            #       USDT'ye çevirmek için last_price ile çarpmak lazım
+            # SPOT: volCcy24h zaten quote currency (USDT) cinsinden
+            if inst_type == "SWAP":
+                volume_usdt = vol_ccy * last_price if vol_ccy > 0 else 0
+            else:
+                volume_usdt = vol_ccy if vol_ccy > 0 else (vol_coin * last_price)
 
             change_pct = 0
             if open_24h > 0:
@@ -222,19 +255,29 @@ class OKXDataFetcher:
         MTF (1H)  -> Sinyal onayı + MTF trend kontrolü
         LTF (15m) -> Giriş noktası + Sweep/Displacement/FVG tespiti
         5m        -> Watchlist onay akışı (5 dakikalık mum takibi)
+        
+        Optimizasyon: 15m (en kritik TF) önce çekilir.
+        Boşsa diğer TF'ler atlanır (gereksiz API çağrısı önlenir).
         """
         data = {}
-        
+
+        # 15 dakikalık - LTF (en kritik, giriş noktası)
+        data["15m"] = self.get_candles(symbol, "15m", 100)
+        if data["15m"] is None or data["15m"].empty:
+            # 15m yoksa diğer TF'leri çekmeye gerek yok
+            data["4H"] = pd.DataFrame()
+            data["1H"] = pd.DataFrame()
+            data["5m"] = pd.DataFrame()
+            return data
+
+        time.sleep(0.1)  # Rate limit
+
         # 4 saatlik - HTF Bias (yapı analizi)
         data["4H"] = self.get_candles(symbol, "4H", 100)
-        time.sleep(0.1)  # Rate limit
+        time.sleep(0.1)
 
         # 1 saatlik - MTF (sinyal onayı)
         data["1H"] = self.get_candles(symbol, "1H", 100)
-        time.sleep(0.1)
-
-        # 15 dakikalık - LTF (giriş noktası)
-        data["15m"] = self.get_candles(symbol, "15m", 100)
         time.sleep(0.1)
 
         # 5 dakikalık - Watchlist onay akışı

@@ -84,7 +84,7 @@ OPTIMIZER_CONFIG = {
 }
 
 # Tarama Aralıkları
-SCAN_INTERVAL_SECONDS = 60  # Her 60 saniyede bir tarama
+SCAN_INTERVAL_SECONDS = 180  # Tarama aralığı (100 coin × 4 TF ≈ 165s, 180s güvenli)
 TRADE_CHECK_INTERVAL = 30   # Açık işlem kontrolü (saniye)
 
 # QPA Tarama (ICT ile eşzamanlı ama bağımsız)

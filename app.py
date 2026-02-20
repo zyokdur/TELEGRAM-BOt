@@ -66,7 +66,7 @@ scan_lock = threading.Lock()
 # =================== ARKA PLAN GÖREVLERİ ===================
 
 def scan_markets():
-    """OKX'ten gerçek zamanlı 5M+ hacimli coinleri tara ve sinyal üret"""
+    """OKX'ten gerçek zamanlı yüksek hacimli coinleri tara ve sinyal üret"""
     if not bot_state["running"]:
         return
 
@@ -1719,14 +1719,32 @@ def api_coin_detail(symbol):
             bear_total = dc_score + vd_score + (flow_score if flow_direction == "BEAR" else 0) + abs(min(support_bonus, 0))
             bull_total = (flow_score if flow_direction == "BULL" else 0) + max(support_bonus, 0)
         else:
-            # Yön yok — sadece VWAP/DPO ve para akışı bilgilendirici
+            # Yön yok — Donchian kırılım/yön vermedi
+            # VWAP/DPO yön-bağımsız konumlandırma göstergesi:
+            #   FAIR_ENTRY/IDEAL_ENTRY = "fiyat adil seviyede" → ne boğa ne ayı
+            #   OVEREXTENDED/TOP/BOTTOM = yön bilgisi içerir → kısmi bonus
+            # Sadece para akışı + destek göstergeler yön belirler
+            
+            # VWAP yönsel katkısı: aşırı durumlar yön verir, adil giriş nötr
+            vwap_adj = 0
+            if vd_signal in ("OVEREXTENDED_BULL", "TOP_FORMING", "STRETCHING_BULL"):
+                vwap_adj = -min(vd_score * 0.3, 10)   # ayı yönünde max 10 puan
+            elif vd_signal in ("OVEREXTENDED_BEAR", "BOTTOM_FORMING", "STRETCHING_BEAR"):
+                vwap_adj = min(vd_score * 0.3, 10)    # boğa yönünde max 10 puan
+            # FAIR_ENTRY, IDEAL_ENTRY, NEUTRAL → 0 (yön bilgisi yok)
+            
+            adj_support = support_bonus + vwap_adj
+            
             if flow_direction == "BULL":
-                bull_total = vd_score * 0.3 + flow_score + max(support_bonus, 0)
+                bull_total = flow_score + max(adj_support, 0)
+                bear_total = abs(min(adj_support, 0))
             elif flow_direction == "BEAR":
-                bear_total = vd_score * 0.3 + flow_score + abs(min(support_bonus, 0))
+                bear_total = flow_score + abs(min(adj_support, 0))
+                bull_total = max(adj_support, 0)
             else:
-                bull_total = vd_score * 0.15
-                bear_total = vd_score * 0.15
+                # Para akışı da kararsız → tamamen nötr, sadece destek göstergeler
+                bull_total = max(adj_support, 0)
+                bear_total = abs(min(adj_support, 0))
 
         net_score = round(bull_total - bear_total, 1)
         confidence = round(max(bull_total, bear_total), 1)
@@ -2020,30 +2038,32 @@ def api_coin_detail(symbol):
             # Zayıflayan boğa: 4H boğa ama 1H veya 15m zayıflıyor
             elif h4_sig in bull_any and (h1_sig == "WEAKENING_BULL" or m15_sig == "WEAKENING_BEAR"):
                 momentum_accel = {"status": "BULL_FADING",
-                                  "detail": "4H boğa ama kısa vadede momentum zayıflıyor — geri çekilme riski.",
+                                  "detail": "4H MACD boğa bölgede ama kısa vadede ivme zayıflıyor — geri çekilme riski.",
                                   "score_adj": -3}
             # Zayıflayan ayı: 4H ayı ama 1H veya 15m toparlanıyor
             elif h4_sig in bear_any and (h1_sig == "WEAKENING_BEAR" or m15_sig == "WEAKENING_BULL"):
                 momentum_accel = {"status": "BEAR_FADING",
-                                  "detail": "4H ayı ama kısa vadede satış baskısı azalıyor — toparlanma olası.",
+                                  "detail": "4H MACD ayı bölgede ama kısa vadede satış baskısı azalıyor — toparlanma olası.",
                                   "score_adj": 3}
             # Momentum dönüşü: 4H bir yönde ama 1H+15m ters yönde
             elif h4_sig in bull_any and h1_sig in bear_accel_types and m15_sig in bear_accel_types:
                 momentum_accel = {"status": "BULL_REVERSAL_RISK",
-                                  "detail": "4H boğa ama 1H ve 15m düşüş ivmesinde — trend dönüşü riski!",
+                                  "detail": "4H MACD boğa ama 1H ve 15m düşüş ivmesinde — trend dönüşü riski!",
                                   "score_adj": -4}
             elif h4_sig in bear_any and h1_sig in bull_accel_types and m15_sig in bull_accel_types:
                 momentum_accel = {"status": "BEAR_REVERSAL_RISK",
-                                  "detail": "4H ayı ama 1H ve 15m yükseliş ivmesinde — dip oluşuyor olabilir.",
+                                  "detail": "4H MACD ayı bölgede ama 1H ve 15m yükseliş ivmesinde — dip oluşuyor olabilir.",
                                   "score_adj": 4}
         except Exception:
             pass
 
         # Orderbook ekstra puan (azaltıldı: max ±2)
+        orderbook_adj = 0
         if orderbook_result.get("signal") == "BULLISH":
-            overall_net += 2
+            orderbook_adj = 2
         elif orderbook_result.get("signal") == "BEARISH":
-            overall_net -= 2
+            orderbook_adj = -2
+        overall_net += orderbook_adj
 
         # Piyasa verileri ekstra puan (fonlama + long/short ratio)
         overall_net += market_data_score
@@ -2051,16 +2071,21 @@ def api_coin_detail(symbol):
         # Momentum ivme skoru
         overall_net += momentum_accel["score_adj"]
 
+        confluence_adj = 0
         confluence_bonus = ""
         if all_bull and not tf_conflict:
-            overall_net += 8
+            confluence_adj = 8
+            overall_net += confluence_adj
             confluence_bonus = " Tüm zaman dilimleri boğa yönünde uyumlu."
         elif all_bear and not tf_conflict:
-            overall_net -= 8
+            confluence_adj = -8
+            overall_net += confluence_adj
             confluence_bonus = " Tüm zaman dilimleri ayı yönünde uyumlu."
         elif tf_conflict:
+            pre_conflict = overall_net
             overall_net *= 0.6  # TF çelişkisi varsa güveni %40 azalt
             overall_net = round(overall_net, 1)
+            confluence_adj = round(overall_net - pre_conflict, 1)
             confluence_bonus = " ⚠ 4H ve 15m zıt sinyaller veriyor — yön netleşene kadar temkinli olun."
 
         # Momentum ivme bilgisini açıklamaya ekle
@@ -2068,7 +2093,7 @@ def api_coin_detail(symbol):
         if momentum_accel["status"] != "NEUTRAL":
             mom_note = f" 📈 İvme: {momentum_accel['detail']}"
 
-        # 4H piyasa rejimini belirle (açıklama için)
+        # 4H piyasa yapısı + gerçek rejim bilgisi
         adx_4h = tf_results["4H"].get("adx", {})
         adx_4h_val = adx_4h.get("adx")
         regime_note = ""
@@ -2077,6 +2102,36 @@ def api_coin_detail(symbol):
                 regime_note = " [Trend piyasası]"
             elif adx_4h_val < 20:
                 regime_note = " [Yatay piyasa]"
+
+        # Gerçek makro rejim bilgisini ekle
+        cached_regime = market_regime.get_cached_regime()
+        macro_regime_info = {}
+        if cached_regime:
+            macro_regime_info = {
+                "regime": cached_regime["regime"],
+                "regime_label": market_regime._regime_label(cached_regime["regime"]),
+                "btc_bias": cached_regime["btc_bias"],
+                "volatility": cached_regime["regime_details"].get("volatility", {}).get("state", "NORMAL"),
+            }
+            # Bu coinin RS skorunu bul
+            all_rs = cached_regime.get("rs_rankings", [])
+            rs_lookup = {r["symbol"]: r for r in all_rs}
+            coin_rs = rs_lookup.get(symbol)
+            if coin_rs:
+                macro_regime_info["rs_score"] = coin_rs["rs_score"]
+                macro_regime_info["rs_rank"] = list(rs_lookup.keys()).index(symbol) + 1
+                macro_regime_info["rs_total"] = len(rs_lookup)
+            elif symbol == "BTC-USDT-SWAP":
+                # BTC referans coin, kendisiyle RS hesaplanmaz
+                macro_regime_info["rs_score"] = 0
+                macro_regime_info["rs_rank"] = "-"
+                macro_regime_info["rs_total"] = len(rs_lookup)
+            else:
+                macro_regime_info["rs_score"] = None
+                macro_regime_info["rs_rank"] = None
+                macro_regime_info["rs_total"] = len(all_rs)
+        else:
+            macro_regime_info = {"regime": "UNKNOWN", "regime_label": "Veri Bekleniyor", "btc_bias": "UNKNOWN"}
 
         # Overall verdict — eşikler yükseltildi (false signal azaltmak için)
         if overall_net >= 30:
@@ -2175,7 +2230,14 @@ def api_coin_detail(symbol):
                 "tf_confluence": "ALL_BULL" if all_bull else ("ALL_BEAR" if all_bear else "MIXED"),
                 "momentum": momentum_accel["status"],
                 "momentum_detail": momentum_accel["detail"] if momentum_accel["status"] != "NEUTRAL" else None,
-                "market_regime": regime_note.strip(" []") if regime_note else "Normal"
+                "adjustments": {
+                    "orderbook": orderbook_adj,
+                    "market_data": market_data_score,
+                    "momentum": momentum_accel["score_adj"],
+                    "confluence": confluence_adj
+                },
+                "market_regime": regime_note.strip(" []") if regime_note else "Normal",
+                "macro_regime": macro_regime_info
             },
             "timestamp": datetime.now().isoformat()
         }
@@ -2216,8 +2278,8 @@ def api_params():
 
 @app.route("/api/coins")
 def api_coins():
-    """OKX'ten 5M+ hacimli aktif coin listesi"""
-    coins = data_fetcher.get_high_volume_coins(force_refresh=True)
+    """OKX'ten yüksek hacimli aktif coin listesi (cache: 5dk)"""
+    coins = data_fetcher.get_high_volume_coins()
     volumes = data_fetcher.get_all_coin_volumes()
     result = []
     for symbol in coins:
@@ -2247,11 +2309,13 @@ def api_regime():
 
 @app.route("/api/regime/refresh", methods=["POST"])
 def api_regime_refresh():
-    """Manuel rejim analizi tetikle (bot çalışmasa da)"""
+    """Manuel rejim analizi tetikle (bot çalışmasa da) — cache bypass"""
     try:
         active_coins = data_fetcher.get_high_volume_coins()
         if not active_coins:
             return jsonify({"error": "Coin listesi alınamadı"}), 400
+        # Cache'i sıfırla ki yeni analiz yapılsın
+        market_regime._regime_ts = 0
         regime_result = market_regime.analyze_market(active_coins)
         bot_state["current_regime"] = regime_result["regime"]
         bot_state["btc_bias"] = regime_result["btc_bias"]
@@ -2414,7 +2478,7 @@ if __name__ == "__main__":
     logger.info("=" * 60)
 
     coins = data_fetcher.get_high_volume_coins(force_refresh=True)
-    logger.info(f"  Başlangıç: {len(coins)} coin 5M+ hacimle tespit edildi")
+    logger.info(f"  Başlangıç: {len(coins)} coin (min ${MIN_VOLUME_USDT:,.0f} hacim) tespit edildi")
     logger.info("=" * 60)
 
     socketio.run(app, host=HOST, port=PORT, debug=DEBUG)

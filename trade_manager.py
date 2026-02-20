@@ -599,7 +599,7 @@ class TradeManager:
         İzleme listesindeki coinleri kontrol et.
 
         5m kapanan mumları tek tek izler:
-        - 3 mum içinde yeterli onay toplanırsa işleme alır
+        - 2 mum içinde yeterli onay toplanırsa işleme alır
         - Yetersiz onayda expire eder
         - Score çok düşerse erken expire eder
         """

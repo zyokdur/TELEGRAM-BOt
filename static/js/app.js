@@ -847,7 +847,7 @@ async function loadRegime() {
 
     updateRegimeTopbar(data);
 
-    // Rejim ana kartı
+    // ═══ HERO BAR: Rejim + Fear&Greed ═══
     const meta = REGIME_META[data.regime] || REGIME_META.UNKNOWN;
     const mainIcon = document.getElementById("regimeMainIcon");
     mainIcon.style.background = meta.bg;
@@ -855,6 +855,24 @@ async function loadRegime() {
     mainIcon.style.border = `1px solid ${meta.border}`;
     document.getElementById("regimeMainValue").textContent = `${meta.emoji} ${meta.label}`;
     document.getElementById("regimeMainValue").style.color = meta.color;
+
+    // Fear & Greed Gauge
+    const fg = data.fear_greed || {};
+    const fgScore = fg.score ?? 50;
+    const fgFill = document.getElementById("fgFill");
+    if (fgFill) fgFill.style.left = `${fgScore}%`;
+    const fgLabelEl = document.getElementById("fgLabel");
+    if (fgLabelEl) {
+        fgLabelEl.textContent = fg.label || "Nötr";
+        fgLabelEl.style.color = fg.color || "var(--text-muted)";
+    }
+    const fgScoreEl = document.getElementById("fgScore");
+    if (fgScoreEl) {
+        fgScoreEl.textContent = fgScore;
+        fgScoreEl.style.color = fg.color || "var(--text-secondary)";
+    }
+
+    // ═══ HIZLI GÖSTERGE KARTLARI ═══
 
     // BTC Trend
     const btcDetails = data.btc_details || {};
@@ -864,14 +882,30 @@ async function loadRegime() {
         btcEl.innerHTML = `<i class="fas fa-clock"></i> Veri Bekleniyor`;
         btcEl.style.color = "var(--text-muted)";
     } else if (btcBias === "LONG") {
-        btcEl.innerHTML = `<i class="fas fa-arrow-up"></i> Yükseliyor (${btcDetails.strength || ""})`;
+        const score = btcDetails.trend_score ? ` (${btcDetails.trend_score > 0 ? '+' : ''}${btcDetails.trend_score})` : '';
+        btcEl.innerHTML = `<i class="fas fa-arrow-up"></i> Yükseliyor${score}`;
         btcEl.style.color = "var(--green)";
     } else if (btcBias === "SHORT") {
-        btcEl.innerHTML = `<i class="fas fa-arrow-down"></i> Düşüyor (${btcDetails.strength || ""})`;
+        const score = btcDetails.trend_score ? ` (${btcDetails.trend_score})` : '';
+        btcEl.innerHTML = `<i class="fas fa-arrow-down"></i> Düşüyor${score}`;
         btcEl.style.color = "var(--red)";
     } else {
-        btcEl.innerHTML = `<i class="fas fa-minus"></i> Yatay`;
+        const score = btcDetails.trend_score ? ` (${btcDetails.trend_score > 0 ? '+' : ''}${btcDetails.trend_score})` : '';
+        btcEl.innerHTML = `<i class="fas fa-minus"></i> Yatay${score}`;
         btcEl.style.color = "var(--text-muted)";
+    }
+
+    // Para Akışı
+    const flow = data.usdt_flow || {};
+    const flowEl = document.getElementById("regimeFlow");
+    if (isUnknown || flow.direction === "UNKNOWN") {
+        flowEl.innerHTML = `<i class="fas fa-clock"></i> Veri Bekleniyor`;
+        flowEl.style.color = "var(--text-muted)";
+    } else {
+        const flowMeta = FLOW_LABELS[flow.direction] || FLOW_LABELS.NEUTRAL;
+        const volPct = flow.volume_change_pct ? ` (${flow.volume_change_pct > 0 ? '+' : ''}${flow.volume_change_pct}%)` : '';
+        flowEl.innerHTML = `<i class="fas ${flowMeta.icon}"></i> ${flowMeta.text}${volPct}`;
+        flowEl.style.color = flowMeta.color;
     }
 
     // BTC.D
@@ -886,25 +920,101 @@ async function loadRegime() {
         btcDEl.style.color = btcdMeta.color;
     }
 
-    // Para Akışı
-    const flow = data.usdt_flow || {};
-    const flowEl = document.getElementById("regimeFlow");
-    if (isUnknown || flow.direction === "UNKNOWN") {
-        flowEl.innerHTML = `<i class="fas fa-clock"></i> Veri Bekleniyor`;
-        flowEl.style.color = "var(--text-muted)";
-    } else {
-        const flowMeta = FLOW_LABELS[flow.direction] || FLOW_LABELS.NEUTRAL;
-        flowEl.innerHTML = `<i class="fas ${flowMeta.icon}"></i> ${flowMeta.text}`;
-        flowEl.style.color = flowMeta.color;
+    // Volatilite
+    const vol = data.volatility || {};
+    const volEl = document.getElementById("regimeVolatility");
+    if (volEl) {
+        const volMeta = {
+            HIGH: { text: `Yüksek (ATR x${vol.atr_ratio || "?"})`, icon: "fa-bolt", color: "#f97316" },
+            LOW: { text: `Düşük — Sıkışma (ATR x${vol.atr_ratio || "?"})`, icon: "fa-compress", color: "var(--yellow, #f0ad4e)" },
+            NORMAL: { text: `Normal (ATR x${vol.atr_ratio || "1.0"})`, icon: "fa-wave-square", color: "var(--text-secondary)" },
+        };
+        const vm = volMeta[vol.state] || volMeta.NORMAL;
+        volEl.innerHTML = `<i class="fas ${vm.icon}"></i> ${vm.text}`;
+        volEl.style.color = vm.color;
     }
 
-    // Fırsat listesi
+    // Piyasa Genişliği
+    const altHealth = data.altcoin_health || {};
+    const breadthEl = document.getElementById("regimeBreadth");
+    if (breadthEl) {
+        const greenR = altHealth.green_ratio ?? 50;
+        const breadthMeta = {
+            STRONG_BULLISH: { text: `%${greenR} Yeşil — Güçlü Ralli`, color: "var(--green)" },
+            BULLISH: { text: `%${greenR} Yeşil — Sağlıklı`, color: "var(--green)" },
+            STRONG_BEARISH: { text: `%${greenR} Yeşil — Yaygın Düşüş`, color: "var(--red)" },
+            BEARISH: { text: `%${greenR} Yeşil — Baskı Altında`, color: "var(--red)" },
+            NEUTRAL: { text: `%${greenR} Yeşil — Karışık`, color: "var(--text-secondary)" },
+        };
+        const bm = breadthMeta[altHealth.market_breadth] || breadthMeta.NEUTRAL;
+        breadthEl.textContent = bm.text;
+        breadthEl.style.color = bm.color;
+    }
+
+    // ═══ ALTCOİN ENDEKS BARI ═══
+    const setAltIdx = (id, val, suffix = "%") => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const v = parseFloat(val) || 0;
+        el.textContent = `${v >= 0 ? "+" : ""}${v.toFixed(2)}${suffix}`;
+        el.style.color = v > 0.3 ? "var(--green)" : v < -0.3 ? "var(--red)" : "var(--text-secondary)";
+    };
+    setAltIdx("altTotal2", altHealth.total2_proxy);
+    setAltIdx("altTotal3", altHealth.total3_proxy);
+    setAltIdx("altOthers", altHealth.others_proxy);
+    setAltIdx("altAvgChange", altHealth.avg_change_1h);
+
+    const greenRatioEl = document.getElementById("altGreenRatio");
+    if (greenRatioEl) {
+        const gr = altHealth.green_ratio ?? 50;
+        greenRatioEl.textContent = `%${gr}`;
+        greenRatioEl.style.color = gr >= 60 ? "var(--green)" : gr <= 40 ? "var(--red)" : "var(--text-secondary)";
+    }
+
+    // ═══ PİYASA YORUMU ═══
+    const commentary = data.market_commentary || [];
+    const commentaryEl = document.getElementById("marketCommentary");
+    if (commentaryEl) {
+        if (commentary.length === 0) {
+            commentaryEl.innerHTML = `<div class="empty-state">
+                <div class="empty-icon"><i class="fas fa-newspaper"></i></div>
+                <p class="empty-title">Piyasa yorumu bekleniyor</p>
+                <p class="empty-desc">Bot çalıştığında detaylı piyasa analizi burada görünecek</p>
+            </div>`;
+        } else {
+            const iconColors = {
+                "fa-globe": "#6366f1",
+                "fab fa-bitcoin": "#f7931a",
+                "fa-money-bill-transfer": "#22c55e",
+                "fa-coins": "#a855f7",
+                "fa-shield-halved": "#f97316",
+                "fa-face-smile": "#3b82f6",
+                "fa-chess": "#14b8a6",
+            };
+            commentaryEl.innerHTML = commentary.map(section => {
+                const isFab = section.icon.startsWith("fab ");
+                const iconClass = isFab ? section.icon : `fas ${section.icon}`;
+                const iconColor = iconColors[section.icon] || "#818cf8";
+                return `<div class="commentary-section">
+                    <div class="commentary-icon" style="background:${iconColor}15;color:${iconColor}">
+                        <i class="${iconClass}"></i>
+                    </div>
+                    <div class="commentary-body">
+                        <div class="commentary-title">${section.title}</div>
+                        <div class="commentary-text">${section.text}</div>
+                    </div>
+                </div>`;
+            }).join("");
+        }
+    }
+
+    // ═══ FIRSAT LİSTESİ ═══
     const longList = (data.long_candidates || []).map(s => s.split("-")[0]);
     const shortList = (data.short_candidates || []).map(s => s.split("-")[0]);
     document.getElementById("regimeLongList").textContent = longList.length > 0 ? longList.join(", ") : "Yok";
     document.getElementById("regimeShortList").textContent = shortList.length > 0 ? shortList.join(", ") : "Yok";
 
-    // RS Sıralaması tablosu
+    // ═══ RS SIRALAMASSI TABLOSU ═══
     const rankings = data.rs_rankings || [];
     const tbody = document.getElementById("rsRankingsTable");
 
@@ -932,8 +1042,8 @@ async function loadRegime() {
         const chgClass = chg >= 0 ? "pnl-positive" : "pnl-negative";
         const chgText = chg >= 0 ? `+${chg.toFixed(2)}%` : `${chg.toFixed(2)}%`;
 
-        const vol = coin.vol_ratio || 0;
-        const volColor = vol >= 1.5 ? "var(--green)" : vol >= 0.8 ? "var(--text-primary)" : "var(--red)";
+        const cvol = coin.vol_ratio || 0;
+        const volColor = cvol >= 1.5 ? "var(--green)" : cvol >= 0.8 ? "var(--text-primary)" : "var(--red)";
 
         const strs = coin.short_term_rs || 0;
         const strsClass = strs > 0 ? "pnl-positive" : strs < 0 ? "pnl-negative" : "";
@@ -957,7 +1067,7 @@ async function loadRegime() {
                 </div>
             </td>
             <td><span class="${chgClass}">${chgText}</span></td>
-            <td class="rs-score" style="color:${volColor}">${vol.toFixed(2)}x</td>
+            <td class="rs-score" style="color:${volColor}">${cvol.toFixed(2)}x</td>
             <td><span class="${strsClass}">${strs > 0 ? "+" : ""}${strs.toFixed(2)}</span></td>
             <td>${statusBadge}</td>
         </tr>`;
@@ -1148,11 +1258,31 @@ async function openCoinDetail(symbol) {
     if (ov.market_regime || ov.momentum || ov.tf_confluence) {
         metaEl.style.display = "flex";
 
-        const regimeIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
-        const regimeColors = {"Trend piyasası": "var(--green)", "Yatay piyasa": "var(--yellow, #f0ad4e)", "Normal": "var(--text-muted)"};
-        const regime = ov.market_regime || "Normal";
-        document.getElementById("metaRegime").innerHTML = `${regimeIcons[regime] || '🔄'} ${regime}`;
-        document.getElementById("metaRegime").style.borderColor = regimeColors[regime] || "var(--text-muted)";
+        // Makro rejim bilgisi (MarketRegime engine'den)
+        const mr = ov.macro_regime || {};
+        const macroMeta = {
+            "RISK_ON": { icon: "🟢", label: "Risk-On", color: "var(--green)" },
+            "ALT_SEASON": { icon: "🚀", label: "Alt Season", color: "var(--purple, #a855f7)" },
+            "RISK_OFF": { icon: "🔴", label: "Risk-Off", color: "var(--red)" },
+            "CAPITULATION": { icon: "☠️", label: "Kapitülasyon", color: "#f97316" },
+            "NEUTRAL": { icon: "⚪", label: "Nötr", color: "var(--text-muted)" },
+            "UNKNOWN": { icon: "❓", label: "Bilinmiyor", color: "var(--text-muted)" },
+        };
+
+        // ADX yapısı + makro rejim birlikte
+        const adxRegime = ov.market_regime || "Normal";
+        const adxIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
+        const macro = macroMeta[mr.regime] || macroMeta.UNKNOWN;
+
+        // RS skoru varsa ekle
+        let rsText = "";
+        if (mr.rs_score != null) {
+            const rsSign = mr.rs_score >= 0 ? "+" : "";
+            rsText = ` | RS: ${rsSign}${mr.rs_score.toFixed(1)} (#${mr.rs_rank || "?"})`;
+        }
+
+        document.getElementById("metaRegime").innerHTML = `${macro.icon} ${macro.label} ${adxIcons[adxRegime] || ""} ${adxRegime}${rsText}`;
+        document.getElementById("metaRegime").style.borderColor = macro.color;
 
         const momLabels = {
             "BULL_ACCELERATING": "🚀 Boğa Hızlanıyor", "BEAR_ACCELERATING": "🚀 Ayı Hızlanıyor",
@@ -1683,11 +1813,27 @@ async function refreshCoinDetail() {
         const metaEl = document.getElementById("verdictMeta");
         if (ov.market_regime || ov.momentum || ov.tf_confluence) {
             metaEl.style.display = "flex";
-            const regimeIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
-            const regimeColors = {"Trend piyasası": "var(--green)", "Yatay piyasa": "var(--yellow, #f0ad4e)", "Normal": "var(--text-muted)"};
-            const regime = ov.market_regime || "Normal";
-            document.getElementById("metaRegime").innerHTML = `${regimeIcons[regime] || '🔄'} ${regime}`;
-            document.getElementById("metaRegime").style.borderColor = regimeColors[regime] || "var(--text-muted)";
+
+            // Makro rejim bilgisi
+            const mr = ov.macro_regime || {};
+            const macroMeta = {
+                "RISK_ON": { icon: "🟢", label: "Risk-On", color: "var(--green)" },
+                "ALT_SEASON": { icon: "🚀", label: "Alt Season", color: "var(--purple, #a855f7)" },
+                "RISK_OFF": { icon: "🔴", label: "Risk-Off", color: "var(--red)" },
+                "CAPITULATION": { icon: "☠️", label: "Kapitülasyon", color: "#f97316" },
+                "NEUTRAL": { icon: "⚪", label: "Nötr", color: "var(--text-muted)" },
+                "UNKNOWN": { icon: "❓", label: "Bilinmiyor", color: "var(--text-muted)" },
+            };
+            const adxRegime = ov.market_regime || "Normal";
+            const adxIcons = {"Trend piyasası": "📈", "Yatay piyasa": "↔️", "Normal": "🔄"};
+            const macro = macroMeta[mr.regime] || macroMeta.UNKNOWN;
+            let rsText = "";
+            if (mr.rs_score != null) {
+                const rsSign = mr.rs_score >= 0 ? "+" : "";
+                rsText = ` | RS: ${rsSign}${mr.rs_score.toFixed(1)} (#${mr.rs_rank || "?"})`;
+            }
+            document.getElementById("metaRegime").innerHTML = `${macro.icon} ${macro.label} ${adxIcons[adxRegime] || ""} ${adxRegime}${rsText}`;
+            document.getElementById("metaRegime").style.borderColor = macro.color;
 
             const momLabels = {"BULL_ACCELERATING": "🚀 Boğa Hızlanıyor", "BEAR_ACCELERATING": "🚀 Ayı Hızlanıyor", "BULL_FADING": "📉 Boğa Zayıflıyor", "BEAR_FADING": "📉 Ayı Zayıflıyor", "BULL_REVERSAL_RISK": "🔄 Dönüş Riski", "BEAR_REVERSAL_RISK": "🔄 Dip Oluşumu", "NEUTRAL": "➖ Nötr İvme"};
             const momColors = {"BULL_ACCELERATING": "var(--green)", "BEAR_ACCELERATING": "var(--red)", "BULL_FADING": "var(--yellow, #f0ad4e)", "BEAR_FADING": "var(--yellow, #f0ad4e)", "BULL_REVERSAL_RISK": "var(--red)", "BEAR_REVERSAL_RISK": "var(--green)", "NEUTRAL": "var(--text-muted)"};

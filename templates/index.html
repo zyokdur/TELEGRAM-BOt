@@ -341,11 +341,11 @@
             <div class="tab-content" id="tab-regime">
                 <div class="content-header">
                     <div class="content-header-left">
-                        <h2>Piyasa Rejimi & Rölatif Güç</h2>
-                        <span class="content-subtitle">BTC Trend, BTC.D Proxy, Para Akışı Analizi</span>
+                        <h2>Piyasa Nabzı</h2>
+                        <span class="content-subtitle">Genel Durum, BTC, Altcoinler, Para Akışı, Duygu Analizi</span>
                     </div>
                     <div class="flex-actions">
-                        <button class="btn-icon" onclick="refreshRegimeManual()" title="Rejim Analizi Yap (OKX'ten çeker)">
+                        <button class="btn-icon" onclick="refreshRegimeManual()" title="Yeniden Analiz Et (OKX'ten çeker)">
                             <i class="fas fa-satellite-dish"></i>
                         </button>
                         <button class="btn-icon" onclick="refreshWithFeedback(this, loadRegime)" title="Cache'den Yenile">
@@ -354,20 +354,42 @@
                     </div>
                 </div>
 
-                <!-- Rejim Kartları -->
-                <div class="regime-cards" id="regimeCards">
-                    <div class="regime-card regime-main">
-                        <div class="regime-card-icon" id="regimeMainIcon"><i class="fas fa-globe"></i></div>
-                        <div class="regime-card-body">
-                            <span class="regime-card-label">Piyasa Rejimi</span>
-                            <span class="regime-card-value" id="regimeMainValue">--</span>
+                <!-- ═══ ANA GÖSTERGE BARI ═══ -->
+                <div class="regime-hero" id="regimeHero">
+                    <div class="regime-hero-left">
+                        <div class="regime-hero-icon" id="regimeMainIcon"><i class="fas fa-globe"></i></div>
+                        <div class="regime-hero-info">
+                            <span class="regime-hero-label">PİYASA REJİMİ</span>
+                            <span class="regime-hero-value" id="regimeMainValue">--</span>
                         </div>
                     </div>
+                    <div class="regime-hero-right">
+                        <div class="fear-greed-gauge" id="fearGreedGauge">
+                            <div class="fg-meter">
+                                <div class="fg-fill" id="fgFill" style="width:50%"></div>
+                            </div>
+                            <div class="fg-info">
+                                <span class="fg-label" id="fgLabel">Nötr</span>
+                                <span class="fg-score" id="fgScore">50</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ HIZLI GÖSTERGE KARTLARI ═══ -->
+                <div class="regime-cards" id="regimeCards">
                     <div class="regime-card">
                         <div class="regime-card-icon btc"><i class="fab fa-bitcoin"></i></div>
                         <div class="regime-card-body">
                             <span class="regime-card-label">BTC Trend</span>
                             <span class="regime-card-value" id="regimeBtcTrend">--</span>
+                        </div>
+                    </div>
+                    <div class="regime-card">
+                        <div class="regime-card-icon flow"><i class="fas fa-money-bill-transfer"></i></div>
+                        <div class="regime-card-body">
+                            <span class="regime-card-label">Para Akışı</span>
+                            <span class="regime-card-value" id="regimeFlow">--</span>
                         </div>
                     </div>
                     <div class="regime-card">
@@ -378,15 +400,64 @@
                         </div>
                     </div>
                     <div class="regime-card">
-                        <div class="regime-card-icon flow"><i class="fas fa-money-bill-transfer"></i></div>
+                        <div class="regime-card-icon" style="background:rgba(249,115,22,0.12);color:#f97316;border:1px solid rgba(249,115,22,0.3)"><i class="fas fa-bolt"></i></div>
                         <div class="regime-card-body">
-                            <span class="regime-card-label">Para Akışı</span>
-                            <span class="regime-card-value" id="regimeFlow">--</span>
+                            <span class="regime-card-label">Volatilite</span>
+                            <span class="regime-card-value" id="regimeVolatility">--</span>
+                        </div>
+                    </div>
+                    <div class="regime-card">
+                        <div class="regime-card-icon" style="background:rgba(168,85,247,0.12);color:#a855f7;border:1px solid rgba(168,85,247,0.3)"><i class="fas fa-heartbeat"></i></div>
+                        <div class="regime-card-body">
+                            <span class="regime-card-label">Piyasa Genişliği</span>
+                            <span class="regime-card-value" id="regimeBreadth">--</span>
                         </div>
                     </div>
                 </div>
 
-                <!-- Fırsat Özeti -->
+                <!-- ═══ ALTCOİN ENDEKS BARI ═══ -->
+                <div class="altcoin-index-bar" id="altcoinIndexBar">
+                    <div class="alt-index-item">
+                        <span class="alt-index-label">TOTAL2</span>
+                        <span class="alt-index-value" id="altTotal2">--</span>
+                    </div>
+                    <div class="alt-index-sep"></div>
+                    <div class="alt-index-item">
+                        <span class="alt-index-label">TOTAL3</span>
+                        <span class="alt-index-value" id="altTotal3">--</span>
+                    </div>
+                    <div class="alt-index-sep"></div>
+                    <div class="alt-index-item">
+                        <span class="alt-index-label">OTHERS</span>
+                        <span class="alt-index-value" id="altOthers">--</span>
+                    </div>
+                    <div class="alt-index-sep"></div>
+                    <div class="alt-index-item">
+                        <span class="alt-index-label">Ort. Değişim</span>
+                        <span class="alt-index-value" id="altAvgChange">--</span>
+                    </div>
+                    <div class="alt-index-sep"></div>
+                    <div class="alt-index-item">
+                        <span class="alt-index-label">Yeşil/Kırmızı</span>
+                        <span class="alt-index-value" id="altGreenRatio">--</span>
+                    </div>
+                </div>
+
+                <!-- ═══ PİYASA YORUMU ═══ -->
+                <div class="card market-commentary-card">
+                    <div class="card-header-inline">
+                        <h3><i class="fas fa-newspaper"></i> Piyasa Analiz Yorumu</h3>
+                    </div>
+                    <div class="commentary-sections" id="marketCommentary">
+                        <div class="empty-state">
+                            <div class="empty-icon"><i class="fas fa-newspaper"></i></div>
+                            <p class="empty-title">Piyasa yorumu bekleniyor</p>
+                            <p class="empty-desc">Bot çalıştığında detaylı piyasa analizi burada görünecek</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ═══ FIRSAT ÖZETİ ═══ -->
                 <div class="regime-opportunity-bar">
                     <div class="regime-opp long-opp">
                         <i class="fas fa-arrow-up"></i>
@@ -400,7 +471,7 @@
                     </div>
                 </div>
 
-                <!-- RS Sıralaması Tablosu -->
+                <!-- ═══ RS TABLOSU ═══ -->
                 <div class="card">
                     <div class="card-header-inline">
                         <h3><i class="fas fa-ranking-star"></i> Rölatif Güç Sıralaması (vs BTC)</h3>
