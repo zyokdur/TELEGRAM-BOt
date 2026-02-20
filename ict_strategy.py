@@ -845,7 +845,6 @@ class ICTStrategy:
 
         # ── 4H Premium/Discount Matrisi ──
         htf_pd = self.calculate_premium_discount(htf_df, structure)
-        htf_extreme = False  # 4H extreme zone flag
 
         result_base = {
             "structure": structure,

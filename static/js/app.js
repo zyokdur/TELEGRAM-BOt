@@ -1857,8 +1857,14 @@ async function refreshCoinDetail() {
             const confLabels = {"ALL_BULL": "✅ Tam Boğa Uyumu", "ALL_BEAR": "✅ Tam Ayı Uyumu", "MIXED": "⚡ Karışık TF"};
             const confColors = {"ALL_BULL": "var(--green)", "ALL_BEAR": "var(--red)", "MIXED": "var(--yellow, #f0ad4e)"};
             const conf = ov.tf_confluence || "MIXED";
-            document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
-            document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+            // TF çatışma varsa özel gösterim (openCoinDetail ile tutarlı)
+            if (ov.tf_conflict) {
+                document.getElementById("metaConfluence").innerHTML = "🚨 TF Çatışma!";
+                document.getElementById("metaConfluence").style.borderColor = "var(--red)";
+            } else {
+                document.getElementById("metaConfluence").innerHTML = confLabels[conf] || "⚡ Karışık";
+                document.getElementById("metaConfluence").style.borderColor = confColors[conf] || "var(--text-muted)";
+            }
         } else {
             metaEl.style.display = "none";
         }

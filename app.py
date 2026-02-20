@@ -2182,7 +2182,7 @@ def api_coin_detail(symbol):
                 f"📊 {tf_breakdown}\n"
                 f"{confluence_bonus.strip()}"
                 f"{mom_note}\n"
-                f"Tüm TF'ler uyumlu — geri çekilmelerde LONG değerlendirilebilir. SL kullanmayı unutmayın."
+                f"{'Tüm TF' if all_bull else 'Ana'} göstergeler LONG yönünde — geri çekilmelerde değerlendirilebilir. SL kullanmayı unutmayın."
             )
         elif overall_net >= 15:
             overall = "BULLISH"
@@ -2214,7 +2214,7 @@ def api_coin_detail(symbol):
                 f"📊 {tf_breakdown}\n"
                 f"{confluence_bonus.strip()}"
                 f"{mom_note}\n"
-                f"Tüm TF'ler uyumlu — yükselişlerde SHORT değerlendirilebilir. SL kullanın."
+                f"{'Tüm TF' if all_bear else 'Ana'} göstergeler SHORT yönünde — yükselişlerde değerlendirilebilir. SL kullanın."
             )
         elif overall_net <= -15:
             overall = "BEARISH"
