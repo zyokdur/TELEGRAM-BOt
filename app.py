@@ -1780,6 +1780,16 @@ def api_coin_detail(symbol):
             "support_adj": {"score": support_bonus, "max": 15, "label": "Destek Göstergeler"},
         }
 
+        # ════════════ FINAL DIRECTION: Verdict'ten türet ════════════
+        # Donchian direction sadece iç SKORLAMA içindir.
+        # Kullanıcıya gösterilen direction, verdikt ile tutarlı olmalı.
+        if verdict in ("STRONG_BULLISH", "BULLISH", "LEANING_BULLISH"):
+            final_direction = "LONG"
+        elif verdict in ("STRONG_BEARISH", "BEARISH", "LEANING_BEARISH"):
+            final_direction = "SHORT"
+        else:
+            final_direction = "NONE"
+
         return {
             "timeframe": tf_label,
             # Ana strateji göstergeleri
@@ -1800,7 +1810,7 @@ def api_coin_detail(symbol):
             "support_resistance": sr_result,
             "divergence": div_result,
             # Strateji sonucu
-            "direction": direction,
+            "direction": final_direction,
             "verdict": verdict,
             "verdict_label": verdict_label,
             "verdict_color": verdict_color,

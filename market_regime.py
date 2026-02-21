@@ -56,7 +56,6 @@ REGIME_CONFIG = {
 
     # Altcoin endeks proxy
     "large_cap_alts": ["ETH", "SOL", "XRP", "ADA", "AVAX", "DOT", "LINK", "MATIC"],
-    "mid_cap_sample": 20,            # TOTAL3/OTHERS proxy için orta-küçük coin sayısı
 
     # Fear & Greed proxy eşikler
     "fg_extreme_fear": 20,
@@ -79,8 +78,6 @@ class MarketRegime:
     def __init__(self):
         self._regime_cache = None
         self._regime_ts = 0
-        self._rs_cache = {}
-        self._rs_ts = 0
 
     @staticmethod
     def _btc_symbol():
@@ -149,7 +146,7 @@ class MarketRegime:
 
         # ── 8. Fırsat Filtreleme ──
         long_candidates, short_candidates = self._filter_opportunities(
-            rs_rankings, regime, btc_trend
+            rs_rankings, regime
         )
 
         # ── 9. Her coin için izin verilen yönleri belirle ──
@@ -487,7 +484,7 @@ class MarketRegime:
 
             # Son ATR vs uzun dönem ortalaması
             recent_atr = np.mean(trs[-period:])
-            long_atr = np.mean(trs[-(period * 2):])
+            long_atr = np.mean(trs)  # Tüm mevcut veriyi uzun dönem olarak kullan
             atr_ratio = recent_atr / long_atr if long_atr > 0 else 1.0
 
             # Son 24 saat fiyat aralığı (%)
@@ -595,7 +592,7 @@ class MarketRegime:
     # ═════════════════════════════════════════════════
     # KATMAN 3: FIRSAT FİLTRELEME
     # ═════════════════════════════════════════════════
-    def _filter_opportunities(self, rs_rankings, regime, btc_trend):
+    def _filter_opportunities(self, rs_rankings, regime):
         """
         Rejime göre LONG ve SHORT adaylarını belirle.
         Çorba yerine sadece gerçek fırsatları seç.
@@ -713,8 +710,8 @@ class MarketRegime:
             large_cap_set = set(f"{a}-USDT-SWAP" for a in cfg["large_cap_alts"])
             eth_symbol = "ETH-USDT-SWAP" if INST_TYPE == "SWAP" else "ETH-USDT"
 
-            large_cap_data = []   # TOTAL2 proxy: ETH + büyük altlar
-            mid_cap_data = []     # TOTAL3 proxy: large_cap hariç
+            total2_data = []      # TOTAL2 proxy: BTC hariç tüm altcoinler
+            total3_data = []      # TOTAL3 proxy: BTC + ETH hariç
             others_data = []      # OTHERS: top 15 hariç herkes
             all_changes = []
 
@@ -723,26 +720,27 @@ class MarketRegime:
                 sym = coin["symbol"]
                 change = coin.get("price_change_1h", 0)
                 all_changes.append(change)
+                total2_data.append(change)  # TOTAL2 = BTC hariç herkes
 
-                if sym == eth_symbol or sym in large_cap_set:
-                    large_cap_data.append(change)
-                    mid_cap_data.append(change)  # T3 = large_cap dahil herkes – ETH
+                if sym == eth_symbol:
+                    pass  # ETH sadece TOTAL2'ye dahil, TOTAL3'e dahil değil
+                elif sym in large_cap_set:
+                    total3_data.append(change)  # Büyük altlar (ETH hariç)
                 else:
+                    total3_data.append(change)  # Orta/küçük coinler
                     # İlk 15'ten sonrakiler OTHERS
                     if i >= 15:
                         others_data.append(change)
-                    mid_cap_data.append(change)
 
             # ── TOTAL2 Proxy (BTC hariç genel) ──
-            if large_cap_data:
-                t2 = np.mean(large_cap_data)
+            if total2_data:
+                t2 = np.mean(total2_data)
                 result["total2_proxy"] = round(t2, 2)
                 result["total2_label"] = self._trend_label(t2)
 
             # ── TOTAL3 Proxy (BTC+ETH hariç) ──
-            non_eth = [c for c in mid_cap_data]
-            if non_eth:
-                t3 = np.mean(non_eth)
+            if total3_data:
+                t3 = np.mean(total3_data)
                 result["total3_proxy"] = round(t3, 2)
                 result["total3_label"] = self._trend_label(t3)
 
