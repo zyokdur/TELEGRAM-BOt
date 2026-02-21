@@ -450,6 +450,21 @@ def api_chart_data(symbol):
         liquidity_levels = ict_strategy.find_liquidity_levels(ltf_data)
         pd_zone = ict_strategy.calculate_premium_discount(ltf_data, structure)
 
+        # EMA hesapla (21 ve 50 periyot)
+        import numpy as np
+        ema21 = ltf_data["close"].ewm(span=21, adjust=False).mean()
+        ema50 = ltf_data["close"].ewm(span=50, adjust=False).mean()
+        ema_21_data = []
+        ema_50_data = []
+        for idx_i, row in ltf_data.iterrows():
+            t = int(row["timestamp"].timestamp())
+            v21 = ema21.loc[idx_i]
+            v50 = ema50.loc[idx_i]
+            if not (isinstance(v21, float) and np.isnan(v21)):
+                ema_21_data.append({"time": t, "value": round(float(v21), 8)})
+            if not (isinstance(v50, float) and np.isnan(v50)):
+                ema_50_data.append({"time": t, "value": round(float(v50), 8)})
+
         # HTF bias
         htf_result = ict_strategy._analyze_htf_bias(multi_tf)
         htf_bias = htf_result["bias"] if htf_result else None
@@ -612,7 +627,13 @@ def api_chart_data(symbol):
             "premium_discount": pd_data,
             "liquidity_levels": liq_data,
             "breaker_blocks": breaker_data,
-            "active_signal": active_signal
+            "active_signal": active_signal,
+            "ema_21": ema_21_data,
+            "ema_50": ema_50_data,
+            "current_price": float(ltf_data.iloc[-1]["close"]) if len(ltf_data) > 0 else None,
+            "market_structure_trend": structure.get("trend", "NEUTRAL"),
+            "structure_shift_count": len(structure.get("choch_events", [])),
+            "bos_count": len(structure.get("bos_events", []))
         }
 
         # numpy tiplerini Python native'e çevir

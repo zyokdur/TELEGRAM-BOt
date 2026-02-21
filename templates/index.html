@@ -1310,18 +1310,28 @@
                     <span class="ict-chart-bias" id="ictChartBias">---</span>
                 </div>
                 <div class="ict-chart-legend" id="ictChartLegend">
-                    <label class="legend-toggle"><input type="checkbox" id="toggleFVG" checked><span class="legend-color" style="background:rgba(155,89,182,0.4)"></span>FVG</label>
-                    <label class="legend-toggle"><input type="checkbox" id="toggleOB" checked><span class="legend-color" style="background:rgba(52,152,219,0.4)"></span>OB</label>
-                    <label class="legend-toggle"><input type="checkbox" id="toggleBOS" checked><span class="legend-color" style="background:rgba(46,204,113,0.5)"></span>BOS</label>
-                    <label class="legend-toggle"><input type="checkbox" id="toggleCHoCH" checked><span class="legend-color" style="background:rgba(241,196,15,0.5)"></span>CHoCH</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleFVG" checked><span class="legend-color" style="background:rgba(155,89,182,0.6)"></span>FVG</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleOB" checked><span class="legend-color" style="background:rgba(52,152,219,0.6)"></span>OB</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleBOS" checked><span class="legend-color" style="background:rgba(46,204,113,0.6)"></span>BOS</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleCHoCH" checked><span class="legend-color" style="background:rgba(241,196,15,0.6)"></span>CHoCH</label>
                     <label class="legend-toggle"><input type="checkbox" id="toggleSweep" checked><span class="legend-color" style="background:rgba(231,76,60,0.6)"></span>Sweep</label>
-                    <label class="legend-toggle"><input type="checkbox" id="togglePD" checked><span class="legend-color" style="background:rgba(149,165,166,0.2)"></span>P/D</label>
+                    <label class="legend-toggle"><input type="checkbox" id="togglePD" checked><span class="legend-color" style="background:rgba(149,165,166,0.4)"></span>P/D</label>
                     <label class="legend-toggle"><input type="checkbox" id="toggleSwing" checked><span class="legend-color" style="background:rgba(189,195,199,0.6)"></span>Swing</label>
                     <label class="legend-toggle"><input type="checkbox" id="toggleSignal" checked><span class="legend-color" style="background:rgba(0,255,127,0.6)"></span>Sinyal</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleEMA" checked><span class="legend-color" style="background:rgba(255,193,7,0.7)"></span>EMA</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleLiquidity" checked><span class="legend-color" style="background:rgba(52,152,219,0.4)"></span>Liq</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleBreaker" checked><span class="legend-color" style="background:rgba(26,188,156,0.5)"></span>BB</label>
+                    <label class="legend-toggle"><input type="checkbox" id="toggleDisplacement" checked><span class="legend-color" style="background:rgba(243,156,18,0.6)"></span>Disp</label>
                 </div>
                 <button class="ict-chart-close" onclick="closeICTChart(event)">
                     <i class="fas fa-times"></i>
                 </button>
+            </div>
+            <div class="ict-ohlcv-bar" id="ictOHLCVLegend">
+                <span style="color:#8b949e">O: ---</span>
+                <span style="color:#8b949e">H: ---</span>
+                <span style="color:#8b949e">L: ---</span>
+                <span style="color:#8b949e">C: ---</span>
             </div>
             <div class="ict-chart-body">
                 <div id="ictChartContainer" style="width:100%;height:100%;"></div>
@@ -1333,10 +1343,19 @@
             <div class="ict-chart-footer" id="ictChartFooter">
                 <div class="ict-info-item"><span class="ict-info-label">Trend:</span> <span id="ictInfoTrend">---</span></div>
                 <div class="ict-info-item"><span class="ict-info-label">Bias:</span> <span id="ictInfoBias">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">R:R:</span> <span id="ictInfoRR">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Conf:</span> <span id="ictInfoConf">---</span></div>
+                <div class="ict-footer-sep"></div>
                 <div class="ict-info-item"><span class="ict-info-label">FVG:</span> <span id="ictInfoFVG">0</span></div>
                 <div class="ict-info-item"><span class="ict-info-label">OB:</span> <span id="ictInfoOB">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">BOS:</span> <span id="ictInfoBOS">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">CHoCH:</span> <span id="ictInfoCHoCH">0</span></div>
                 <div class="ict-info-item"><span class="ict-info-label">Sweep:</span> <span id="ictInfoSweep">---</span></div>
+                <div class="ict-footer-sep"></div>
                 <div class="ict-info-item"><span class="ict-info-label">Zone:</span> <span id="ictInfoZone">---</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Disp:</span> <span id="ictInfoDisp">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">Liq:</span> <span id="ictInfoLiq">0</span></div>
+                <div class="ict-info-item"><span class="ict-info-label">BB:</span> <span id="ictInfoBB">0</span></div>
             </div>
         </div>
     </div>

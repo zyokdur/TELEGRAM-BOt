@@ -37,7 +37,8 @@ from config import (
     WATCH_CONFIRM_TIMEFRAME,
     WATCH_CONFIRM_CANDLES,
     WATCH_REQUIRED_CONFIRMATIONS,
-    LIMIT_ORDER_EXPIRY_HOURS
+    LIMIT_ORDER_EXPIRY_HOURS,
+    MAX_TRADE_DURATION_HOURS
 )
 
 logger = logging.getLogger("ICT-Bot.TradeManager")
@@ -466,6 +467,10 @@ class TradeManager:
         Breakeven ve Trailing SL yönetimi:
         - TP'nin %50'sine ulaştıysa → SL'yi entry'ye taşı (breakeven)
         - TP'nin %75'ine ulaştıysa → SL'yi kârın %50'sinde tut (trailing)
+        
+        Ek korumalar:
+        - Max işlem süresi: MAX_TRADE_DURATION_HOURS saat sonra otomatik kapanış
+        - PnL cap: SL slippage durumunda PnL, max SL risk ile sınırlandırılır
         """
         symbol = signal["symbol"]
         result = {
@@ -473,6 +478,32 @@ class TradeManager:
             "direction": direction, "current_price": current_price,
             "entry_price": entry_price, "status": "ACTIVE"
         }
+
+        # ===== MAX TRADE DURATION KONTROLÜ =====
+        entry_time = signal.get("entry_time") or signal.get("created_at", "")
+        if entry_time:
+            try:
+                entry_dt = datetime.fromisoformat(entry_time)
+                trade_hours = (datetime.now() - entry_dt).total_seconds() / 3600
+                if trade_hours > MAX_TRADE_DURATION_HOURS:
+                    # Pozisyonu mevcut fiyattan kapat
+                    if direction == "LONG":
+                        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    else:
+                        pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    status = "WON" if pnl_pct > 0 else "LOST"
+                    update_signal_status(signal_id, status, close_price=current_price, pnl_pct=pnl_pct)
+                    self._trade_state.pop(signal_id, None)
+                    result["status"] = status
+                    result["pnl_pct"] = round(pnl_pct, 2)
+                    emoji = "🏆" if pnl_pct > 0 else "⏰"
+                    logger.info(
+                        f"{emoji} MAX SÜRE AŞIMI: #{signal_id} {symbol} {direction} | "
+                        f"{trade_hours:.1f}h > {MAX_TRADE_DURATION_HOURS}h | PnL: {pnl_pct:+.2f}%"
+                    )
+                    return result
+            except Exception:
+                pass
 
         # Seviye doğrulama (ters SL/TP eski sinyalleri temizle)
         if direction == "LONG" and (stop_loss >= entry_price or take_profit <= entry_price):
@@ -507,7 +538,18 @@ class TradeManager:
                 logger.info(f"🏆 KAZANDIK: #{signal_id} {symbol} LONG | PnL: +{pnl_pct:.2f}%")
             # SL kontrolü
             elif current_price <= effective_sl:
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                # PnL'yi hesapla — slippage durumunda max SL risk ile sınırla
+                raw_pnl = ((current_price - entry_price) / entry_price) * 100
+                max_sl_loss = ((effective_sl - entry_price) / entry_price) * 100
+                # Slippage koruması: PnL en fazla SL seviyesindeki kayıp + %0.5 buffer
+                if raw_pnl < 0 and raw_pnl < max_sl_loss - 0.5:
+                    pnl_pct = max_sl_loss - 0.5  # SL noktasındaki kayıp + slippage buffer
+                    logger.warning(
+                        f"⚠️ SLIPPAGE: #{signal_id} {symbol} LONG | Gerçek: {raw_pnl:.2f}% → Capped: {pnl_pct:.2f}% "
+                        f"(SL: {effective_sl:.8f}, Kapanış: {current_price:.8f})"
+                    )
+                else:
+                    pnl_pct = raw_pnl
                 sl_type = self._get_sl_close_type(state)
                 status = "WON" if pnl_pct > 0 else "LOST"
                 update_signal_status(signal_id, status, close_price=current_price, pnl_pct=pnl_pct)
@@ -537,7 +579,18 @@ class TradeManager:
                 logger.info(f"🏆 KAZANDIK: #{signal_id} {symbol} SHORT | PnL: +{pnl_pct:.2f}%")
             # SL kontrolü
             elif current_price >= effective_sl:
-                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                # PnL'yi hesapla — slippage durumunda max SL risk ile sınırla
+                raw_pnl = ((entry_price - current_price) / entry_price) * 100
+                max_sl_loss = ((entry_price - effective_sl) / entry_price) * 100
+                # Slippage koruması: PnL en fazla SL seviyesindeki kayıp + %0.5 buffer
+                if raw_pnl < 0 and raw_pnl < max_sl_loss - 0.5:
+                    pnl_pct = max_sl_loss - 0.5
+                    logger.warning(
+                        f"⚠️ SLIPPAGE: #{signal_id} {symbol} SHORT | Gerçek: {raw_pnl:.2f}% → Capped: {pnl_pct:.2f}% "
+                        f"(SL: {effective_sl:.8f}, Kapanış: {current_price:.8f})"
+                    )
+                else:
+                    pnl_pct = raw_pnl
                 sl_type = self._get_sl_close_type(state)
                 status = "WON" if pnl_pct > 0 else "LOST"
                 update_signal_status(signal_id, status, close_price=current_price, pnl_pct=pnl_pct)

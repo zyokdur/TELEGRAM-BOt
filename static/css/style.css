@@ -2784,11 +2784,29 @@ button:focus:not(:focus-visible) { outline: none; }
     to { transform: rotate(360deg); }
 }
 
+/* OHLCV Legend Bar */
+.ict-ohlcv-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 20px;
+    background: rgba(13,17,23,0.95);
+    border-bottom: 1px solid rgba(139,148,158,0.08);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    flex-shrink: 0;
+    min-height: 24px;
+    flex-wrap: wrap;
+}
+.ict-ohlcv-bar span {
+    white-space: nowrap;
+}
+
 /* Footer info bar */
 .ict-chart-footer {
     display: flex;
     align-items: center;
-    gap: 20px;
+    gap: 12px;
     padding: 8px 20px;
     background: rgba(22,27,34,0.95);
     border-top: 1px solid rgba(139,148,158,0.12);
@@ -2798,14 +2816,20 @@ button:focus:not(:focus-visible) { outline: none; }
 .ict-info-item {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 12px;
+    gap: 4px;
+    font-size: 11px;
     color: var(--text-primary, #e6edf3);
     font-family: 'JetBrains Mono', monospace;
 }
 .ict-info-label {
     color: var(--text-muted, #484f58);
     font-weight: 500;
+}
+.ict-footer-sep {
+    width: 1px;
+    height: 16px;
+    background: rgba(139,148,158,0.15);
+    flex-shrink: 0;
 }
 
 /* Signal row clickable style */
@@ -2832,11 +2856,13 @@ button:focus:not(:focus-visible) { outline: none; }
     .ict-chart-overlay { padding: 0; }
     .ict-chart-legend { gap: 4px; }
     .legend-toggle { font-size: 10px; padding: 2px 5px; }
-    .ict-chart-footer { gap: 10px; padding: 6px 12px; }
-    .ict-info-item { font-size: 11px; }
+    .ict-chart-footer { gap: 8px; padding: 6px 12px; }
+    .ict-info-item { font-size: 10px; }
+    .ict-ohlcv-bar { gap: 8px; padding: 3px 12px; font-size: 10px; }
 }
 @media (max-width: 600px) {
     .ict-chart-header { padding: 8px 12px; }
     .ict-chart-title { font-size: 14px; }
     .ict-chart-legend { display: none; }
+    .ict-footer-sep { display: none; }
 }

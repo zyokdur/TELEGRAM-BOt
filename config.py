@@ -73,6 +73,8 @@ ICT_PARAMS = {
 # Limit Emir Ayarları
 LIMIT_ORDER_EXPIRY_HOURS = 6  # Limit emir geçerlilik süresi (saat)
                               # FVG'ye limit emir koyulduğunda max bekleme zamanı
+MAX_TRADE_DURATION_HOURS = 12 # Aktif işlem max yaşam süresi (saat)
+                              # 15m TF sinyal geçerliliği: uzun süren işlemler kaybetme eğiliminde
 
 # Optimizer Parametreleri
 OPTIMIZER_CONFIG = {
@@ -85,7 +87,7 @@ OPTIMIZER_CONFIG = {
 
 # Tarama Aralıkları
 SCAN_INTERVAL_SECONDS = 180  # Tarama aralığı (100 coin × 4 TF ≈ 165s, 180s güvenli)
-TRADE_CHECK_INTERVAL = 30   # Açık işlem kontrolü (saniye)
+TRADE_CHECK_INTERVAL = 10   # Açık işlem kontrolü (saniye) — 30→10: slippage azaltma
 
 # QPA Tarama (ICT ile eşzamanlı ama bağımsız)
 QPA_SCAN_ENABLED = True     # QPA stratejisi aktif mi?

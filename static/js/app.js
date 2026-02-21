@@ -2474,6 +2474,9 @@ let ictCandleSeries = null;
 let ictVolumeSeries = null;
 let ictChartData = null;
 let ictExtraSeriesList = [];
+let ictResizeObserver = null;
+let ictEma21Series = null;
+let ictEma50Series = null;
 
 function openICTChart(symbol) {
     const overlay = document.getElementById("ictChartOverlay");
@@ -2487,7 +2490,13 @@ function openICTChart(symbol) {
         ictChart.remove();
         ictChart = null;
     }
+    if (ictResizeObserver) {
+        ictResizeObserver.disconnect();
+        ictResizeObserver = null;
+    }
     ictExtraSeriesList = [];
+    ictEma21Series = null;
+    ictEma50Series = null;
 
     // Veri çek ve render et
     fetchICTChartData(symbol);
@@ -2501,7 +2510,13 @@ function closeICTChart(event) {
         ictChart.remove();
         ictChart = null;
     }
+    if (ictResizeObserver) {
+        ictResizeObserver.disconnect();
+        ictResizeObserver = null;
+    }
     ictExtraSeriesList = [];
+    ictEma21Series = null;
+    ictEma50Series = null;
 }
 
 async function fetchICTChartData(symbol) {
@@ -2548,7 +2563,7 @@ function renderICTChart(data) {
         },
         rightPriceScale: {
             borderColor: "rgba(139,148,158,0.15)",
-            scaleMargins: { top: 0.1, bottom: 0.2 }
+            scaleMargins: { top: 0.05, bottom: 0.2 }
         },
         timeScale: {
             borderColor: "rgba(139,148,158,0.15)",
@@ -2587,6 +2602,25 @@ function renderICTChart(data) {
     }));
     ictVolumeSeries.setData(volData);
 
+    // EMA çizgileri
+    if (document.getElementById("toggleEMA").checked) {
+        drawEMALines(data);
+    }
+
+    // Güncel fiyat çizgisi
+    if (data.current_price) {
+        const lastCandle = data.candles[data.candles.length - 1];
+        const isUp = lastCandle ? lastCandle.close >= lastCandle.open : true;
+        ictCandleSeries.createPriceLine({
+            price: data.current_price,
+            color: isUp ? "#00d4aa" : "#ff4757",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Solid,
+            axisLabelVisible: true,
+            title: ""
+        });
+    }
+
     // ICT katmanlarını çiz
     drawICTLayers(data);
 
@@ -2606,14 +2640,20 @@ function renderICTChart(data) {
     // Loading gizle
     document.getElementById("ictChartLoading").style.display = "none";
 
-    // Resize observer
-    const ro = new ResizeObserver(() => {
+    // Resize observer (eski varsa temizle)
+    if (ictResizeObserver) {
+        ictResizeObserver.disconnect();
+    }
+    ictResizeObserver = new ResizeObserver(() => {
         if (ictChart) ictChart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
     });
-    ro.observe(container);
+    ictResizeObserver.observe(container);
 
     // Toggle checkbox listeners
     setupICTToggleListeners();
+
+    // OHLCV crosshair legend
+    setupCrosshairLegend(data);
 
     // Son 50 muma zoom yap
     if (data.candles.length > 50) {
@@ -2623,19 +2663,121 @@ function renderICTChart(data) {
     }
 }
 
+function drawEMALines(data) {
+    // EMA 21 serisi
+    if (data.ema_21 && data.ema_21.length > 0) {
+        ictEma21Series = ictChart.addLineSeries({
+            color: "rgba(255,193,7,0.7)",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Solid,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title: ""
+        });
+        ictEma21Series.setData(data.ema_21);
+    }
+    // EMA 50 serisi
+    if (data.ema_50 && data.ema_50.length > 0) {
+        ictEma50Series = ictChart.addLineSeries({
+            color: "rgba(0,188,212,0.7)",
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Solid,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title: ""
+        });
+        ictEma50Series.setData(data.ema_50);
+    }
+}
+
+function setupCrosshairLegend(data) {
+    if (!ictChart || !ictCandleSeries) return;
+
+    const legendEl = document.getElementById("ictOHLCVLegend");
+    if (!legendEl) return;
+
+    // Son mum değerlerini başlangıçta göster
+    if (data.candles.length > 0) {
+        const last = data.candles[data.candles.length - 1];
+        updateOHLCVDisplay(last, legendEl, data);
+    }
+
+    ictChart.subscribeCrosshairMove(param => {
+        if (!param || !param.time) {
+            // Crosshair chart dışındaysa son mum göster
+            if (data.candles.length > 0) {
+                updateOHLCVDisplay(data.candles[data.candles.length - 1], legendEl, data);
+            }
+            return;
+        }
+
+        const candleData = param.seriesData.get(ictCandleSeries);
+        if (candleData) {
+            updateOHLCVDisplay(candleData, legendEl, data);
+        }
+    });
+}
+
+function updateOHLCVDisplay(candle, legendEl, data) {
+    if (!candle) return;
+
+    const isUp = candle.close >= candle.open;
+    const color = isUp ? "#00d4aa" : "#ff4757";
+    const change = candle.open !== 0 ? ((candle.close - candle.open) / candle.open * 100).toFixed(2) : "0.00";
+
+    // Fiyat format (küçük fiyatlar için daha fazla decimal)
+    const priceDecimals = candle.close < 0.01 ? 6 : candle.close < 1 ? 4 : candle.close < 100 ? 3 : 2;
+    const fmt = (v) => v !== undefined ? Number(v).toFixed(priceDecimals) : "---";
+    const volFmt = (v) => {
+        if (!v) return "0";
+        if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+        return v.toFixed(0);
+    };
+
+    // Eşleşen candle'ından volume al
+    let vol = candle.volume;
+    if (vol === undefined && data && data.candles) {
+        const match = data.candles.find(c => c.time === candle.time);
+        if (match) vol = match.volume;
+    }
+
+    // EMA değerleri
+    let ema21Val = "", ema50Val = "";
+    if (data && data.ema_21) {
+        const e21 = data.ema_21.find(e => e.time === candle.time);
+        if (e21) ema21Val = `<span style="color:rgba(255,193,7,0.9)">EMA21: ${fmt(e21.value)}</span>`;
+    }
+    if (data && data.ema_50) {
+        const e50 = data.ema_50.find(e => e.time === candle.time);
+        if (e50) ema50Val = `<span style="color:rgba(0,188,212,0.9)">EMA50: ${fmt(e50.value)}</span>`;
+    }
+
+    legendEl.innerHTML =
+        `<span style="color:${color}">O: ${fmt(candle.open)}</span>` +
+        `<span style="color:${color}">H: ${fmt(candle.high)}</span>` +
+        `<span style="color:${color}">L: ${fmt(candle.low)}</span>` +
+        `<span style="color:${color}">C: ${fmt(candle.close)}</span>` +
+        `<span style="color:${color}">${change}%</span>` +
+        `<span style="color:#8b949e">Vol: ${volFmt(vol)}</span>` +
+        (ema21Val ? ema21Val : "") +
+        (ema50Val ? ema50Val : "");
+}
+
 function drawICTLayers(data) {
     if (!ictCandleSeries || !ictChart) return;
 
     const markers = [];
 
-    // 1) FVG bölgeleri (mor dikdörtgenler → area series trick)
+    // 1) FVG bölgeleri
     if (document.getElementById("toggleFVG").checked && data.fvgs && data.fvgs.length > 0) {
         data.fvgs.forEach((fvg, i) => {
             const isBullish = fvg.type === "BULLISH";
-            const color = isBullish ? "rgba(155,89,182,0.20)" : "rgba(231,76,60,0.20)";
             const borderColor = isBullish ? "rgba(155,89,182,0.60)" : "rgba(231,76,60,0.60)";
 
-            // FVG horizontal price line markers
             ictCandleSeries.createPriceLine({
                 price: fvg.high,
                 color: borderColor,
@@ -2653,23 +2795,22 @@ function drawICTLayers(data) {
                 title: ""
             });
 
-            // FVG marker
             markers.push({
                 time: fvg.time,
                 position: isBullish ? "belowBar" : "aboveBar",
                 color: isBullish ? "#9b59b6" : "#e74c3c",
                 shape: "square",
-                text: `FVG ${isBullish ? "▲" : "▼"}`
+                text: `FVG ${isBullish ? "▲" : "▼"}`,
+                _priority: 2
             });
         });
     }
 
-    // 2) Order Blocks (mavi/turuncu dikdörtgenler)
+    // 2) Order Blocks
     if (document.getElementById("toggleOB").checked && data.order_blocks && data.order_blocks.length > 0) {
         data.order_blocks.forEach((ob) => {
             const isBullish = ob.type === "BULLISH";
             const color = isBullish ? "rgba(52,152,219,0.50)" : "rgba(230,126,34,0.50)";
-            const label = isBullish ? "Bull OB" : "Bear OB";
 
             ictCandleSeries.createPriceLine({
                 price: ob.high,
@@ -2693,7 +2834,8 @@ function drawICTLayers(data) {
                 position: isBullish ? "belowBar" : "aboveBar",
                 color: isBullish ? "#3498db" : "#e67e22",
                 shape: "square",
-                text: label
+                text: isBullish ? "Bull OB" : "Bear OB",
+                _priority: 3
             });
         });
     }
@@ -2706,8 +2848,9 @@ function drawICTLayers(data) {
                 time: bos.time,
                 position: isBullish ? "aboveBar" : "belowBar",
                 color: isBullish ? "#2ecc71" : "#e74c3c",
-                shape: "arrowUp",
-                text: "BOS"
+                shape: isBullish ? "arrowUp" : "arrowDown",
+                text: "BOS",
+                _priority: 4
             });
 
             ictCandleSeries.createPriceLine({
@@ -2730,7 +2873,8 @@ function drawICTLayers(data) {
                 position: isBullish ? "aboveBar" : "belowBar",
                 color: "#f1c40f",
                 shape: "circle",
-                text: "CHoCH"
+                text: "CHoCH",
+                _priority: 5
             });
 
             ictCandleSeries.createPriceLine({
@@ -2751,8 +2895,9 @@ function drawICTLayers(data) {
             time: sw.time,
             position: sw.type === "SSL_SWEEP" ? "belowBar" : "aboveBar",
             color: "#e74c3c",
-            shape: "arrowDown",
-            text: `🔥 ${sw.type === "SSL_SWEEP" ? "SSL" : "BSL"} Sweep`
+            shape: sw.type === "SSL_SWEEP" ? "arrowDown" : "arrowUp",
+            text: `🔥 ${sw.type === "SSL_SWEEP" ? "SSL" : "BSL"} Sweep`,
+            _priority: 6
         });
 
         ictCandleSeries.createPriceLine({
@@ -2769,7 +2914,6 @@ function drawICTLayers(data) {
     if (document.getElementById("togglePD").checked && data.premium_discount) {
         const pd = data.premium_discount;
 
-        // Equilibrium line
         ictCandleSeries.createPriceLine({
             price: pd.equilibrium,
             color: "rgba(149,165,166,0.7)",
@@ -2779,7 +2923,6 @@ function drawICTLayers(data) {
             title: "EQ"
         });
 
-        // OTE zone lines
         if (pd.ote_high && pd.ote_low) {
             ictCandleSeries.createPriceLine({
                 price: pd.ote_high,
@@ -2799,7 +2942,6 @@ function drawICTLayers(data) {
             });
         }
 
-        // Premium/Discount background lines
         ictCandleSeries.createPriceLine({
             price: pd.high,
             color: "rgba(231,76,60,0.3)",
@@ -2827,7 +2969,8 @@ function drawICTLayers(data) {
                     position: "aboveBar",
                     color: "rgba(189,195,199,0.7)",
                     shape: "arrowDown",
-                    text: "HH"
+                    text: "HH",
+                    _priority: 1
                 });
             });
         }
@@ -2838,7 +2981,8 @@ function drawICTLayers(data) {
                     position: "belowBar",
                     color: "rgba(189,195,199,0.7)",
                     shape: "arrowUp",
-                    text: "LL"
+                    text: "LL",
+                    _priority: 1
                 });
             });
         }
@@ -2854,7 +2998,7 @@ function drawICTLayers(data) {
             lineWidth: 2,
             lineStyle: LightweightCharts.LineStyle.Dashed,
             axisLabelVisible: true,
-            title: `Entry (${sig.direction})`
+            title: `▶ Entry (${sig.direction})`
         });
 
         ictCandleSeries.createPriceLine({
@@ -2863,7 +3007,7 @@ function drawICTLayers(data) {
             lineWidth: 2,
             lineStyle: LightweightCharts.LineStyle.Dashed,
             axisLabelVisible: true,
-            title: "Stop Loss"
+            title: "✕ Stop Loss"
         });
 
         ictCandleSeries.createPriceLine({
@@ -2872,12 +3016,24 @@ function drawICTLayers(data) {
             lineWidth: 2,
             lineStyle: LightweightCharts.LineStyle.Dashed,
             axisLabelVisible: true,
-            title: "Take Profit"
+            title: "★ Take Profit"
         });
+
+        // R:R oranı hesapla ve göster
+        if (sig.entry && sig.sl && sig.tp) {
+            const risk = Math.abs(sig.entry - sig.sl);
+            const reward = Math.abs(sig.tp - sig.entry);
+            const rr = risk > 0 ? (reward / risk).toFixed(1) : "∞";
+            const rrEl = document.getElementById("ictInfoRR");
+            if (rrEl) {
+                rrEl.textContent = `1:${rr}`;
+                rrEl.style.color = parseFloat(rr) >= 2 ? "#00d4aa" : parseFloat(rr) >= 1 ? "#f1c40f" : "#ff4757";
+            }
+        }
     }
 
     // 9) Liquidity levels
-    if (data.liquidity_levels && data.liquidity_levels.length > 0) {
+    if (document.getElementById("toggleLiquidity").checked && data.liquidity_levels && data.liquidity_levels.length > 0) {
         data.liquidity_levels.forEach(liq => {
             const isHighs = liq.type === "EQUAL_HIGHS";
             ictCandleSeries.createPriceLine({
@@ -2892,7 +3048,7 @@ function drawICTLayers(data) {
     }
 
     // 10) Breaker blocks
-    if (data.breaker_blocks && data.breaker_blocks.length > 0) {
+    if (document.getElementById("toggleBreaker").checked && data.breaker_blocks && data.breaker_blocks.length > 0) {
         data.breaker_blocks.forEach(bb => {
             const isBullish = bb.type === "BULLISH";
             ictCandleSeries.createPriceLine({
@@ -2916,38 +3072,52 @@ function drawICTLayers(data) {
                 position: isBullish ? "belowBar" : "aboveBar",
                 color: isBullish ? "#1abc9c" : "#c0392b",
                 shape: "diamond",
-                text: "BB"
+                text: "BB",
+                _priority: 2
             });
         });
     }
 
     // 11) Displacement candles
-    if (data.displacements && data.displacements.length > 0) {
+    if (document.getElementById("toggleDisplacement").checked && data.displacements && data.displacements.length > 0) {
         data.displacements.forEach(d => {
             markers.push({
                 time: d.time,
                 position: d.direction === "BULLISH" ? "belowBar" : "aboveBar",
                 color: "#f39c12",
                 shape: "circle",
-                text: "⚡"
+                text: "⚡",
+                _priority: 1
             });
         });
     }
 
-    // Marker'ları time sırasına göre sırala ve set et
+    // Marker'ları time sırasına göre sırala
     if (markers.length > 0) {
         markers.sort((a, b) => a.time - b.time);
 
-        // Aynı time+position'da birden fazla marker varsa sadece birini tut (önemli olanı)
-        const uniqueMarkers = [];
-        const seen = new Set();
+        // Aynı time+position'da birden fazla marker varsa textlerini birleştir (en yüksek priority olanı ana shape olarak kullan)
+        const grouped = {};
         for (const m of markers) {
             const key = `${m.time}-${m.position}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                uniqueMarkers.push(m);
+            if (!grouped[key]) {
+                grouped[key] = { ...m };
+            } else {
+                // Text birleştir
+                grouped[key].text += ` + ${m.text}`;
+                // Daha yüksek priority olan şekli kullan (büyük sayı = daha önemli)
+                if ((m._priority || 0) > (grouped[key]._priority || 0)) {
+                    grouped[key].shape = m.shape;
+                    grouped[key].color = m.color;
+                    grouped[key]._priority = m._priority;
+                }
             }
         }
+        const uniqueMarkers = Object.values(grouped).map(m => {
+            const { _priority, ...clean } = m;
+            return clean;
+        });
+        uniqueMarkers.sort((a, b) => a.time - b.time);
         ictCandleSeries.setMarkers(uniqueMarkers);
     }
 }
@@ -2970,16 +3140,60 @@ function updateICTFooter(data) {
 
     const biasEl = document.getElementById("ictInfoBias");
     biasEl.style.color = data.htf_bias === "LONG" ? "var(--green)" : data.htf_bias === "SHORT" ? "var(--red)" : "var(--text-secondary)";
+
+    // Ekstra footer bilgileri
+    const dispEl = document.getElementById("ictInfoDisp");
+    if (dispEl) dispEl.textContent = data.displacements ? data.displacements.length : 0;
+
+    const liqEl = document.getElementById("ictInfoLiq");
+    if (liqEl) liqEl.textContent = data.liquidity_levels ? data.liquidity_levels.length : 0;
+
+    const bbEl = document.getElementById("ictInfoBB");
+    if (bbEl) bbEl.textContent = data.breaker_blocks ? data.breaker_blocks.length : 0;
+
+    const bosEl = document.getElementById("ictInfoBOS");
+    if (bosEl) bosEl.textContent = data.bos_count || 0;
+
+    const chochEl = document.getElementById("ictInfoCHoCH");
+    if (chochEl) chochEl.textContent = data.structure_shift_count || 0;
+
+    // R:R başlangıç
+    const rrEl = document.getElementById("ictInfoRR");
+    if (rrEl && data.active_signal) {
+        const sig = data.active_signal;
+        const risk = Math.abs(sig.entry - sig.sl);
+        const reward = Math.abs(sig.tp - sig.entry);
+        const rr = risk > 0 ? (reward / risk).toFixed(1) : "∞";
+        rrEl.textContent = `1:${rr}`;
+        rrEl.style.color = parseFloat(rr) >= 2 ? "#00d4aa" : parseFloat(rr) >= 1 ? "#f1c40f" : "#ff4757";
+    } else if (rrEl) {
+        rrEl.textContent = "---";
+        rrEl.style.color = "var(--text-secondary)";
+    }
+
+    // Confidence
+    const confEl = document.getElementById("ictInfoConf");
+    if (confEl && data.active_signal && data.active_signal.confidence) {
+        const conf = data.active_signal.confidence;
+        confEl.textContent = `${conf}%`;
+        confEl.style.color = conf >= 70 ? "#00d4aa" : conf >= 50 ? "#f1c40f" : "#ff4757";
+    } else if (confEl) {
+        confEl.textContent = "---";
+        confEl.style.color = "var(--text-secondary)";
+    }
 }
 
 function setupICTToggleListeners() {
-    const toggleIds = ["toggleFVG", "toggleOB", "toggleBOS", "toggleCHoCH", "toggleSweep", "togglePD", "toggleSwing", "toggleSignal"];
+    const toggleIds = [
+        "toggleFVG", "toggleOB", "toggleBOS", "toggleCHoCH", "toggleSweep",
+        "togglePD", "toggleSwing", "toggleSignal", "toggleEMA",
+        "toggleLiquidity", "toggleBreaker", "toggleDisplacement"
+    ];
     toggleIds.forEach(id => {
         const el = document.getElementById(id);
         if (el) {
             el.onchange = () => {
                 if (ictChartData && ictCandleSeries) {
-                    // Price line'ları temizlemek için chart'ı yeniden çiz
                     redrawICTChart();
                 }
             };
@@ -2998,6 +3212,8 @@ function redrawICTChart() {
     ictChart.remove();
     ictChart = null;
     ictExtraSeriesList = [];
+    ictEma21Series = null;
+    ictEma50Series = null;
 
     renderICTChart(ictChartData);
 
